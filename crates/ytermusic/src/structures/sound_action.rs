@@ -77,7 +77,7 @@ impl SoundAction {
                 player.music_status.insert(video, status);
             }
             Self::AddVideosToQueue(video) => {
-                let db = DATABASE.read().unwrap();
+                let db = DATABASE.read();
                 for v in video {
                     Self::insert(
                         player,
@@ -107,12 +107,7 @@ impl SoundAction {
                 Self::insert(
                     player,
                     video.video_id.clone(),
-                    if DATABASE
-                        .read()
-                        .unwrap()
-                        .iter()
-                        .any(|e| e.video_id == video.video_id)
-                    {
+                    if DATABASE.read().iter().any(|e| e.video_id == video.video_id) {
                         MusicDownloadStatus::Downloaded
                     } else {
                         MusicDownloadStatus::NotDownloaded
