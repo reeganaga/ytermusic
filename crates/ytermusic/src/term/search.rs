@@ -10,17 +10,14 @@ use ratatui::{
     Frame,
 };
 use tokio::task::JoinHandle;
-use ytpapi2::{
-    HeaderMap, HeaderValue, SearchResults, YoutubeMusicInstance, YoutubeMusicPlaylistRef,
-    YoutubeMusicVideoRef,
-};
+use ytpapi2::{SearchResults, YoutubeMusicPlaylistRef, YoutubeMusicVideoRef};
 
 use crate::{
     consts::CONFIG,
-    get_header_file, run_service,
+    run_service,
     structures::sound_action::{download_manager_handler, SoundAction},
     systems::DOWNLOAD_MANAGER,
-    try_get_cookies,
+    tasks::api::API,
     utils::{invert, to_bidi_string},
     ShutdownSignal, DATABASE,
 };
@@ -36,7 +33,6 @@ pub struct Search {
     pub goto: Screens,
     pub list: Arc<RwLock<ListItem<Status>>>,
     pub search_handle: Option<JoinHandle<()>>,
-    pub api: Option<Arc<YoutubeMusicInstance>>,
     pub action_sender: Sender<SoundAction>,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -124,7 +120,7 @@ impl Screen for Search {
             .collect::<Vec<_>>();
         self.list.write().unwrap().update_contents(local.clone());
 
-        if let Some(api) = self.api.clone() {
+        if let Some(api) = API.get().cloned() {
             let text = self.text.clone();
             let items = self.list.clone();
             self.search_handle = Some(run_service(async move {
@@ -224,7 +220,7 @@ impl Screen for Search {
     }
 }
 impl Search {
-    pub async fn new(action_sender: Sender<SoundAction>) -> Self {
+    pub fn new(action_sender: Sender<SoundAction>) -> Self {
         Self {
             text: String::new(),
             list: Arc::new(RwLock::new(ListItem::new(
@@ -232,22 +228,6 @@ impl Search {
             ))),
             goto: Screens::MusicPlayer,
             search_handle: None,
-            api: if let Some(cookies) = try_get_cookies() {
-                let mut headermap = HeaderMap::new();
-                headermap.insert(
-                    "cookie",
-                    HeaderValue::from_str(&cookies).unwrap(),
-                );
-                headermap.insert(
-                    "user-agent",
-                    HeaderValue::from_static("Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"),
-                );
-                YoutubeMusicInstance::new(headermap, None).await    //don't think we need a brand account for search
-            } else {
-                YoutubeMusicInstance::from_header_file(get_header_file().unwrap().1.as_path()).await
-            }
-                .ok()
-                .map(Arc::new),
             action_sender,
         }
     }

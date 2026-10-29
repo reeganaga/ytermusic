@@ -1,17 +1,38 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use flume::Sender;
 use log::{error, info};
 use once_cell::sync::Lazy;
 use tokio::task::JoinSet;
-use ytpapi2::{Endpoint, YoutubeMusicInstance, YoutubeMusicPlaylistRef};
+use ytpapi2::{Endpoint, HeaderMap, HeaderValue, YoutubeMusicInstance, YoutubeMusicPlaylistRef};
 
 use crate::{
     consts::CONFIG,
     get_header_file, run_service,
     structures::performance,
     term::{ManagerMessage, Screens},
+    try_get_cookies,
 };
+
+/// Shared API client, set once the API task has connected.
+/// Reused by the search screen so only one HTTP client exists.
+pub static API: OnceLock<Arc<YoutubeMusicInstance>> = OnceLock::new();
+
+async fn create_instance() -> ytpapi2::Result<YoutubeMusicInstance> {
+    if let Some(cookies) = try_get_cookies() {
+        let mut headermap = HeaderMap::new();
+        headermap.insert("cookie", HeaderValue::from_str(&cookies).unwrap());
+        headermap.insert(
+            "user-agent",
+            HeaderValue::from_static(
+                "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+            ),
+        );
+        YoutubeMusicInstance::new(headermap, None).await
+    } else {
+        YoutubeMusicInstance::from_header_file(get_header_file().unwrap().1.as_path()).await
+    }
+}
 
 pub fn get_text_cookies_expired_or_invalid() -> String {
     let (Ok((_, path)) | Err((_, path))) = get_header_file();
@@ -25,11 +46,11 @@ pub fn spawn_api_task(updater_s: Sender<ManagerMessage>) {
     run_service(async move {
         info!("API task on");
         let guard = performance::guard("API task");
-        let client =
-            YoutubeMusicInstance::from_header_file(get_header_file().unwrap().1.as_path()).await;
+        let client = create_instance().await;
         match client {
             Ok(api) => {
                 let api = Arc::new(api);
+                let _ = API.set(api.clone());
                 let mut set = JoinSet::new();
                 let api_ = api.clone();
                 let updater_s_ = updater_s.clone();
