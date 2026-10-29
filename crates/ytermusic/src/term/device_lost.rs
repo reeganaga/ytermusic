@@ -33,7 +33,7 @@ impl Screen for DeviceLost {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame) {
+    fn render(&mut self, frame: &mut Frame, area: Rect) {
         frame.render_widget(
             Paragraph::new(format!(
                 "{}\nPress [Enter] or [Space] to retry.\nOr [Esc] to exit",
@@ -48,7 +48,7 @@ impl Screen for DeviceLost {
                     .title(" Error ")
                     .border_type(BorderType::Plain),
             ),
-            frame.size(),
+            area,
         );
     }
 

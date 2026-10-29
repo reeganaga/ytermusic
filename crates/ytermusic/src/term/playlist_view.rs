@@ -72,8 +72,8 @@ impl Screen for PlaylistView {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame) {
-        frame.render_widget(&self.items, frame.size());
+    fn render(&mut self, frame: &mut Frame, area: Rect) {
+        frame.render_widget(&self.items, area);
     }
 
     fn handle_global_message(&mut self, m: ManagerMessage) -> EventResponse {

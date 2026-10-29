@@ -1,23 +1,15 @@
-use common_structs::{AppStatus, MusicDownloadStatus};
+use common_structs::MusicDownloadStatus;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
 use rand::seq::SliceRandom;
-use ratatui::widgets::{Block, Borders, Gauge};
 
 use crate::{
-    consts::CONFIG,
-    structures::{
-        app_status::{AppStatusExt, MusicDownloadStatusExt},
-        sound_action::SoundAction,
-    },
+    structures::{app_status::MusicDownloadStatusExt, sound_action::SoundAction},
     systems::{player::PlayerState, DOWNLOAD_MANAGER},
     utils::{invert, to_bidi_string},
 };
 
-use super::{
-    rect_contains, relative_pos, split_x, split_y, vertical_gauge::VerticalGauge, EventResponse,
-    ManagerMessage, Screen, Screens,
-};
+use super::{rect_contains, relative_pos, EventResponse, ManagerMessage, Screen, Screens};
 
 impl PlayerState {
     pub fn activate(&mut self, index: usize) {
@@ -42,10 +34,9 @@ impl Screen for PlayerState {
     ) -> EventResponse {
         let x = mouse_event.column;
         let y = mouse_event.row;
-        let [top_rect, bottom] = split_y(*frame_data, 3);
-        let [list_rect, volume_rect] = split_x(top_rect, 10);
-        if let MouseEventKind::Down(_) = &mouse_event.kind {
-            if rect_contains(&list_rect, x, y, 1) {
+        let list_rect = *frame_data;
+        match mouse_event.kind {
+            MouseEventKind::Down(_) if rect_contains(&list_rect, x, y, 1) => {
                 let (_, y) = relative_pos(&list_rect, x, y, 1);
                 if let Some(e) = self
                     .list_selector
@@ -54,38 +45,9 @@ impl Screen for PlayerState {
                     self.activate(e);
                 }
             }
-            if rect_contains(&bottom, x, y, 1) {
-                let (x, _) = relative_pos(&bottom, x, y, 1);
-                let size = bottom.width as usize - 2;
-                let percent = x as f64 / size as f64;
-                if let Some(duration) = self.sink.duration() {
-                    let new_position = (duration * 1000. * percent) as u64;
-                    self.sink
-                        .seek_to(std::time::Duration::from_millis(new_position));
-                }
-            }
-            if rect_contains(&volume_rect, x, y, 1) {
-                let (_, y) = relative_pos(&volume_rect, x, y, 1);
-                let size = volume_rect.height as usize - 2;
-                let percent = 100. - y as f64 / size as f64 * 100.;
-                self.sink.set_volume(percent as i32)
-            }
-        } else if let MouseEventKind::ScrollUp = &mouse_event.kind {
-            if rect_contains(&volume_rect, x, y, 1) {
-                SoundAction::Plus.apply_sound_action(self);
-            } else if rect_contains(&bottom, x, y, 1) {
-                SoundAction::Forward.apply_sound_action(self);
-            } else {
-                self.list_selector.scroll_up();
-            }
-        } else if let MouseEventKind::ScrollDown = &mouse_event.kind {
-            if rect_contains(&volume_rect, x, y, 1) {
-                SoundAction::Minus.apply_sound_action(self);
-            } else if rect_contains(&bottom, x, y, 1) {
-                SoundAction::Backward.apply_sound_action(self);
-            } else {
-                self.list_selector.scroll_down();
-            }
+            MouseEventKind::ScrollUp => self.list_selector.scroll_up(),
+            MouseEventKind::ScrollDown => self.list_selector.scroll_down(),
+            _ => {}
         }
         EventResponse::None
     }
@@ -172,58 +134,7 @@ impl Screen for PlayerState {
         }
     }
 
-    fn render(&mut self, f: &mut ratatui::Frame) {
-        let render_volume_slider = CONFIG.player.volume_slider;
-        let [top_rect, progress_rect] = split_y(f.size(), 3);
-        let [list_rect, volume_rect] = split_x(top_rect, if render_volume_slider { 10 } else { 0 });
-        let colors = if self.sink.is_paused() {
-            AppStatus::Paused
-        } else if self.sink.is_finished() {
-            AppStatus::NoMusic
-        } else {
-            AppStatus::Playing
-        }
-        .style();
-        if render_volume_slider {
-            f.render_widget(
-                VerticalGauge::default()
-                    .block(Block::default().title(" Volume ").borders(Borders::ALL))
-                    .gauge_style(colors)
-                    .ratio((self.sink.volume() as f64 / 100.).clamp(0.0, 1.0)),
-                volume_rect,
-            );
-        }
-        let current_time = self.sink.elapsed().as_secs();
-        let total_time = self.sink.duration().map(|x| x as u32).unwrap_or(0);
-        f.render_widget(
-            Gauge::default()
-                .block(
-                    Block::default()
-                        .title(
-                            self.current()
-                                .map(|x| format!(" {} ", to_bidi_string(&x.to_string())))
-                                .unwrap_or_else(|| " No music playing ".to_owned()),
-                        )
-                        .borders(Borders::ALL),
-                )
-                .gauge_style(colors)
-                .ratio(
-                    if self.sink.is_finished() {
-                        0.5
-                    } else {
-                        self.sink.percentage().min(100.)
-                    }
-                    .clamp(0.0, 1.0),
-                )
-                .label(format!(
-                    "{}:{:02} / {}:{:02}",
-                    current_time / 60,
-                    current_time % 60,
-                    total_time / 60,
-                    total_time % 60
-                )),
-            progress_rect,
-        );
+    fn render(&mut self, f: &mut ratatui::Frame, list_rect: ratatui::layout::Rect) {
         // Create a List from all list items and highlight the currently selected one
         self.list_selector.update(self.list.len(), self.current);
         self.list_selector.render(

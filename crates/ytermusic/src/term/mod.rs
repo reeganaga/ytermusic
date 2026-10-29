@@ -2,10 +2,10 @@ pub mod device_lost;
 pub mod item_list;
 pub mod list_selector;
 pub mod music_player;
+pub mod now_playing;
 pub mod playlist;
 pub mod playlist_view;
 pub mod search;
-pub mod vertical_gauge;
 
 use std::{
     io::{self},
@@ -36,7 +36,8 @@ use crate::term::playlist_view::PlaylistView;
 pub trait Screen {
     fn on_mouse_press(&mut self, mouse_event: MouseEvent, frame_data: &Rect) -> EventResponse;
     fn on_key_press(&mut self, mouse_event: KeyEvent, frame_data: &Rect) -> EventResponse;
-    fn render(&mut self, frame: &mut Frame);
+    /// Draws the screen in `area`, the space left above the now playing panel
+    fn render(&mut self, frame: &mut Frame, area: Rect);
     fn handle_global_message(&mut self, message: ManagerMessage) -> EventResponse;
     fn close(&mut self, new_screen: Screens) -> EventResponse;
     fn open(&mut self) -> EventResponse;
@@ -211,10 +212,13 @@ impl Manager {
                     break 'a;
                 }
             }
-            let rectsize = terminal.size()?;
+            let (screen_area, panel_area) = now_playing::split(terminal.size()?);
             terminal.draw(|f| {
                 self.music_player.update();
-                self.current_screen().render(f);
+                self.current_screen().render(f, screen_area);
+                if let Some(panel) = panel_area {
+                    now_playing::render(&self.music_player, f, panel);
+                }
             })?;
 
             let timeout = tick_rate
@@ -229,13 +233,20 @@ impl Manager {
                         {
                             break;
                         }
-                        let k = self.current_screen().on_key_press(key, &rectsize);
+                        let k = self.current_screen().on_key_press(key, &screen_area);
                         if self.handle_event(k) {
                             break;
                         }
                     }
                     Event::Mouse(mouse) => {
-                        let k = self.current_screen().on_mouse_press(mouse, &rectsize);
+                        let on_panel = panel_area.is_some_and(|panel| {
+                            now_playing::on_mouse(&mut self.music_player, mouse, panel)
+                        });
+                        let k = if on_panel {
+                            EventResponse::None
+                        } else {
+                            self.current_screen().on_mouse_press(mouse, &screen_area)
+                        };
                         if self.handle_event(k) {
                             break;
                         }
@@ -279,14 +290,6 @@ pub fn split_y(f: Rect, end_size: u16) -> [Rect; 2] {
     let mut rectprogress = f;
     rectprogress.y += rectprogress.height.saturating_sub(end_size);
     rectprogress.height = end_size;
-    [rectlistvol, rectprogress]
-}
-pub fn split_x(f: Rect, end_size: u16) -> [Rect; 2] {
-    let mut rectlistvol = f;
-    rectlistvol.width = rectlistvol.width.saturating_sub(end_size);
-    let mut rectprogress = f;
-    rectprogress.x += rectprogress.width.saturating_sub(end_size);
-    rectprogress.width = end_size;
     [rectlistvol, rectprogress]
 }
 
