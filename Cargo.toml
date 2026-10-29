@@ -13,4 +13,4 @@ common-structs = { path = "crates/common-structs" }
 codegen-units = 1
 debug = true
 lto = true
-opt-level = 3
+opt-level = "s"
