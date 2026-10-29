@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use ytpapi2::{SearchResults, YoutubeMusicPlaylistRef, YoutubeMusicVideoRef};
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     run_service,
     structures::sound_action::{download_manager_handler, SoundAction},
     systems::DOWNLOAD_MANAGER,
-    tasks::api::API,
+    tasks::api::{API, FETCH_LIMIT},
     utils::{invert, to_bidi_string},
     ShutdownSignal, DATABASE,
 };
@@ -126,6 +126,7 @@ impl Screen for Search {
                 // Sleep to prevent spamming the api
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 let mut item = Vec::new();
+                let mut playlists = Vec::new();
                 match api
                     .search(&text.replace('\\', "\\\\").replace('\"', "\\\""), 0)
                     .await
@@ -145,33 +146,7 @@ impl Screen for Search {
                                 },
                             ));
                         }
-                        for playlist in p.into_iter() {
-                            let api = api.clone();
-                            let items = items.clone();
-                            run_service(async move {
-                                match api.get_playlist(&playlist, 0).await {
-                                    Ok(e) => {
-                                        if e.is_empty() {
-                                            return;
-                                        }
-                                        items.write().unwrap().add_element((
-                                            format_playlist(
-                                                &format!(
-                                                    " [P] {} ({})",
-                                                    to_bidi_string(&playlist.name),
-                                                    to_bidi_string(&playlist.subtitle)
-                                                ),
-                                                &e,
-                                            ),
-                                            Status::PlayList(playlist, e),
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        error!("{e:?}");
-                                    }
-                                };
-                            });
-                        }
+                        playlists = p;
                     }
                     Err(e) => {
                         error!("{e:?}");
@@ -180,6 +155,40 @@ impl Screen for Search {
                 let mut local = local;
                 local.append(&mut item);
                 items.write().unwrap().update_contents(local);
+
+                // Owned by this task so they are aborted when the search text changes
+                let mut fetches = JoinSet::new();
+                for playlist in playlists {
+                    let api = api.clone();
+                    let items = items.clone();
+                    fetches.spawn(async move {
+                        let permit = FETCH_LIMIT.acquire().await.unwrap();
+                        let videos = api.get_playlist(&playlist, 0).await;
+                        drop(permit);
+                        match videos {
+                            Ok(e) => {
+                                if e.is_empty() {
+                                    return;
+                                }
+                                items.write().unwrap().add_element((
+                                    format_playlist(
+                                        &format!(
+                                            " [P] {} ({})",
+                                            to_bidi_string(&playlist.name),
+                                            to_bidi_string(&playlist.subtitle)
+                                        ),
+                                        &e,
+                                    ),
+                                    Status::PlayList(playlist, e),
+                                ));
+                            }
+                            Err(e) => {
+                                error!("{e:?}");
+                            }
+                        };
+                    });
+                }
+                while fetches.join_next().await.is_some() {}
             }));
         }
 

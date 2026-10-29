@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use flume::Sender;
 use log::{error, info};
 use once_cell::sync::Lazy;
-use tokio::task::JoinSet;
+use tokio::{sync::Semaphore, task::JoinSet};
 use ytpapi2::{Endpoint, HeaderMap, HeaderValue, YoutubeMusicInstance, YoutubeMusicPlaylistRef};
 
 use crate::{
@@ -17,6 +17,9 @@ use crate::{
 /// Shared API client, set once the API task has connected.
 /// Reused by the search screen so only one HTTP client exists.
 pub static API: OnceLock<Arc<YoutubeMusicInstance>> = OnceLock::new();
+
+/// Limits how many playlists are fetched at once, each response is parsed fully in memory.
+pub static FETCH_LIMIT: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(CONFIG.global.fetch_limit()));
 
 async fn create_instance() -> ytpapi2::Result<YoutubeMusicInstance> {
     if let Some(cookies) = try_get_cookies() {
@@ -179,7 +182,10 @@ fn spawn_browse_playlist_task(
     run_service(async move {
         let guard = format!("Browse playlist {} {}", playlist.name, playlist.browse_id);
         let guard = performance::guard(&guard);
-        match api.get_playlist(&playlist, 5).await {
+        let permit = FETCH_LIMIT.acquire().await.unwrap();
+        let videos = api.get_playlist(&playlist, 5).await;
+        drop(permit);
+        match videos {
             Ok(videos) => {
                 if videos.len() < 2 {
                     info!("Playlist {} is too small so skipped", playlist.name);
