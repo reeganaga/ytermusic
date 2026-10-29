@@ -42,7 +42,9 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-/// `mi_option_purge_delay` in the mimalloc v2 `mimalloc.h` option enum (not exported by libmimalloc-sys).
+// Option ids from the mimalloc v2 `mimalloc.h` option enum (not all exported by libmimalloc-sys).
+const MI_OPTION_EAGER_COMMIT: std::ffi::c_int = 3;
+const MI_OPTION_ARENA_EAGER_COMMIT: std::ffi::c_int = 4;
 const MI_OPTION_PURGE_DELAY: std::ffi::c_int = 15;
 
 fn run_service<T>(future: T) -> tokio::task::JoinHandle<()>
@@ -68,6 +70,12 @@ fn main() {
     // Return freed memory to the OS right away instead of keeping it cached,
     // the startup API responses would otherwise stay resident for the whole session.
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
+    // Commit memory on demand, eager commit makes segments land on transparent huge pages
+    // which keeps whole 2MB pages resident for a few KB of data.
+    unsafe {
+        libmimalloc_sys::mi_option_set(MI_OPTION_EAGER_COMMIT, 0);
+        libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+    }
     // Check if the first param is --files
     if let Some(arg) = std::env::args().nth(1) {
         match arg.as_str() {
