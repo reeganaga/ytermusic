@@ -36,6 +36,7 @@ souvlaki = "0.7.3"
 
 #  --- Alloc ---
 mimalloc = { version = "0.1.39", default-features = false }
+libmimalloc-sys = { version = "0.1.44", default-features = false, features = ["extended"] }
 
 #  --- Config ---
 toml = "0.8.11"

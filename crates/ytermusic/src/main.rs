@@ -42,6 +42,9 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+/// `mi_option_purge_delay` in the mimalloc v2 `mimalloc.h` option enum (not exported by libmimalloc-sys).
+const MI_OPTION_PURGE_DELAY: std::ffi::c_int = 15;
+
 fn run_service<T>(future: T) -> tokio::task::JoinHandle<()>
 where
     T: Future + Send + 'static,
@@ -62,6 +65,9 @@ pub fn try_get_cookies() -> Option<String> {
 }
 
 fn main() {
+    // Return freed memory to the OS right away instead of keeping it cached,
+    // the startup API responses would otherwise stay resident for the whole session.
+    unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
     // Check if the first param is --files
     if let Some(arg) = std::env::args().nth(1) {
         match arg.as_str() {
