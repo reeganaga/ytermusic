@@ -67,6 +67,12 @@ pub fn try_get_cookies() -> Option<String> {
 }
 
 fn main() {
+    // mimalloc madvises its segments onto transparent huge pages, so a whole 2MB page stays
+    // resident for a few KB of data. Its own opt-out never triggers, so disable THP here.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    }
     // Return freed memory to the OS right away instead of keeping it cached,
     // the startup API responses would otherwise stay resident for the whole session.
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
