@@ -36,11 +36,20 @@ mod tasks;
 
 pub use database::DATABASE;
 
-use mimalloc::MiMalloc;
-
-// Changes the allocator to improve performance especially on Windows
+// Changes the allocator to improve performance especially on Windows.
+// On glibc Linux mimalloc keeps far more memory resident than the system allocator.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Returns freed heap memory to the OS. glibc otherwise keeps the memory freed after
+/// the startup API responses cached for the whole session.
+pub fn release_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
 
 fn run_service<T>(future: T) -> tokio::task::JoinHandle<()>
 where

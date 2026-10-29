@@ -245,6 +245,7 @@ impl Manager {
             }
             if last_tick.elapsed() >= tick_rate {
                 last_tick = Instant::now();
+                crate::release_memory();
             }
         }
 
