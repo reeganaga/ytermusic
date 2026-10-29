@@ -153,13 +153,13 @@ impl SoundAction {
                 DATABASE.remove_video(&video);
 
                 let cache_folder = CACHE_DIR.join("downloads");
-                let json_path = cache_folder.join(format!("{}.json", &video.video_id));
+                let json_path = cache_folder.join(format!("{}.json", video.video_id));
                 match fs::remove_file(json_path) {
                     Ok(_) => trace!("Deleted JSON file"),
                     Err(e) => error!("Error deleting JSON video file: {}", e),
                 }
 
-                let mp4_path = cache_folder.join(format!("{}.mp4", &video.video_id));
+                let mp4_path = cache_folder.join(format!("{}.mp4", video.video_id));
                 match fs::remove_file(mp4_path) {
                     Ok(_) => trace!("Deleted MP4 file"),
                     Err(e) => error!("Error deleting MP4 video file: {}", e),
