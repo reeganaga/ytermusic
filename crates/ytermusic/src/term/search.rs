@@ -26,6 +26,7 @@ use crate::{
 };
 
 use super::{
+    action::Action,
     item_list::{ListItem, ListItemAction},
     playlist::format_playlist,
     split_y_start, EventResponse, ManagerMessage, Screen, Screens,
@@ -79,13 +80,21 @@ impl Screen for Search {
         }
     }
 
-    fn on_key_press(&mut self, key: KeyEvent, _: &Rect) -> EventResponse {
-        if KeyCode::Esc == key.code {
-            return ManagerMessage::ChangeState(self.goto).event();
+    fn on_action(&mut self, action: Action, count: usize, _: &Rect) -> EventResponse {
+        let (input, modifiers) = match action {
+            Action::Back => return ManagerMessage::ChangeState(self.goto).event(),
+            // Ctrl+Enter adds the music without leaving the search
+            Action::SelectInBackground => (Action::Select, KeyModifiers::CONTROL),
+            _ => (action, KeyModifiers::NONE),
+        };
+        let selected = self.list.write().unwrap().on_action(input, count).cloned();
+        match selected {
+            Some(e) => self.execute_status(e, modifiers),
+            None => EventResponse::None,
         }
-        if let Some(e) = self.list.write().unwrap().on_key_press(key) {
-            return self.execute_status(e.clone(), key.modifiers);
-        }
+    }
+
+    fn on_text_input(&mut self, key: KeyEvent) -> EventResponse {
         let textbefore = self.text.trim().to_owned();
         match key.code {
             KeyCode::Delete | KeyCode::Backspace => {

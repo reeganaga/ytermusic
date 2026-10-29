@@ -1,5 +1,7 @@
+pub mod action;
 pub mod device_lost;
 pub mod item_list;
+pub mod keymap;
 pub mod list_selector;
 pub mod music_player;
 pub mod playlist;
@@ -14,8 +16,7 @@ use std::{
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, KeyEventKind, KeyModifiers,
-        MouseEvent,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, KeyEventKind, MouseEvent,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -28,14 +29,26 @@ use crate::{
     is_shutdown_sent, shutdown, structures::sound_action::SoundAction, systems::player::PlayerState,
 };
 
-use self::{device_lost::DeviceLost, item_list::ListItem, playlist::Chooser, search::Search};
+use self::{
+    action::Action,
+    device_lost::DeviceLost,
+    item_list::ListItem,
+    keymap::{KeyResolver, KeyResult, Keymap},
+    playlist::Chooser,
+    search::Search,
+};
 
 use crate::term::playlist_view::PlaylistView;
 
 // A trait to handle the different screens
 pub trait Screen {
     fn on_mouse_press(&mut self, mouse_event: MouseEvent, frame_data: &Rect) -> EventResponse;
-    fn on_key_press(&mut self, mouse_event: KeyEvent, frame_data: &Rect) -> EventResponse;
+    /// Called with the action bound to the keys the user typed, repeated `count` times
+    fn on_action(&mut self, action: Action, count: usize, frame_data: &Rect) -> EventResponse;
+    /// Called with keys that have no binding on this screen
+    fn on_text_input(&mut self, _key: KeyEvent) -> EventResponse {
+        EventResponse::None
+    }
     fn render(&mut self, frame: &mut Frame);
     fn handle_global_message(&mut self, message: ManagerMessage) -> EventResponse;
     fn close(&mut self, new_screen: Screens) -> EventResponse;
@@ -92,6 +105,8 @@ pub struct Manager {
     device_lost: DeviceLost,
     current_screen: Screens,
     playlist_viewer: PlaylistView,
+    keymap: Keymap,
+    key_resolver: KeyResolver,
 }
 
 impl Manager {
@@ -112,6 +127,8 @@ impl Manager {
             search: Search::new(action_sender).await,
             current_screen: Screens::Playlist,
             device_lost: DeviceLost(Vec::new(), None),
+            keymap: Keymap::default(),
+            key_resolver: KeyResolver::default(),
         }
     }
     pub fn current_screen(&mut self) -> &mut dyn Screen {
@@ -128,6 +145,8 @@ impl Manager {
     }
     pub fn set_current_screen(&mut self, screen: Screens) {
         self.current_screen = screen;
+        // A half typed key sequence belongs to the screen it was typed on
+        self.key_resolver.reset();
         let k = self.current_screen().open();
         self.handle_event(k);
     }
@@ -223,13 +242,17 @@ impl Manager {
             if crossterm::event::poll(timeout)? {
                 match event::read()? {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
-                        if (key.code == event::KeyCode::Char('c')
-                            || key.code == event::KeyCode::Char('d'))
-                            && key.modifiers == KeyModifiers::CONTROL
+                        let k = match self
+                            .key_resolver
+                            .feed(&self.keymap, self.current_screen, key)
                         {
-                            break;
-                        }
-                        let k = self.current_screen().on_key_press(key, &rectsize);
+                            KeyResult::Action(Action::Quit, _) => ManagerMessage::Quit.event(),
+                            KeyResult::Action(action, count) => {
+                                self.current_screen().on_action(action, count, &rectsize)
+                            }
+                            KeyResult::Unbound(key) => self.current_screen().on_text_input(key),
+                            KeyResult::Consumed => EventResponse::None,
+                        };
                         if self.handle_event(k) {
                             break;
                         }

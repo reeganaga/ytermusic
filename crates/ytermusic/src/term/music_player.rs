@@ -1,5 +1,5 @@
 use common_structs::{AppStatus, MusicDownloadStatus};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::event::MouseEventKind;
 
 use rand::seq::SliceRandom;
 use ratatui::widgets::{Block, Borders, Gauge};
@@ -15,8 +15,8 @@ use crate::{
 };
 
 use super::{
-    rect_contains, relative_pos, split_x, split_y, vertical_gauge::VerticalGauge, EventResponse,
-    ManagerMessage, Screen, Screens,
+    action::Action, rect_contains, relative_pos, split_x, split_y, vertical_gauge::VerticalGauge,
+    EventResponse, ManagerMessage, Screen, Screens,
 };
 
 impl PlayerState {
@@ -90,10 +90,15 @@ impl Screen for PlayerState {
         EventResponse::None
     }
 
-    fn on_key_press(&mut self, key: KeyEvent, _: &ratatui::layout::Rect) -> EventResponse {
-        match key.code {
-            KeyCode::Esc => ManagerMessage::ChangeState(self.goto).event(),
-            KeyCode::F(5) => {
+    fn on_action(
+        &mut self,
+        action: Action,
+        count: usize,
+        _: &ratatui::layout::Rect,
+    ) -> EventResponse {
+        match action {
+            Action::Back => return ManagerMessage::ChangeState(self.goto).event(),
+            Action::RetryDownloads => {
                 // Get all musics that have failled to download
                 let mut musics = Vec::new();
                 self.music_status
@@ -109,67 +114,40 @@ impl Screen for PlayerState {
                     });
                 // Download them
                 DOWNLOAD_MANAGER.add_to_download_list(musics);
-                EventResponse::None
             }
-            KeyCode::Char('f') => ManagerMessage::SearchFrom(Screens::MusicPlayer).event(),
-            KeyCode::Char('s') => {
+            Action::OpenSearch => return ManagerMessage::SearchFrom(Screens::MusicPlayer).event(),
+            Action::Shuffle => {
                 self.list.shuffle(&mut rand::thread_rng());
                 self.current = 0;
                 self.sink.stop();
-                EventResponse::None
             }
-            KeyCode::Char('C') => {
-                SoundAction::Cleanup.apply_sound_action(self);
-                EventResponse::None
-            }
-            KeyCode::Char(' ') => {
-                SoundAction::PlayPause.apply_sound_action(self);
-                EventResponse::None
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.list_selector.scroll_up();
-                EventResponse::None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.list_selector.scroll_down();
-                EventResponse::None
-            }
-            KeyCode::Enter => {
+            Action::Cleanup => SoundAction::Cleanup.apply_sound_action(self),
+            Action::PlayPause => SoundAction::PlayPause.apply_sound_action(self),
+            Action::Up => (0..count).for_each(|_| self.list_selector.scroll_up()),
+            Action::Down => (0..count).for_each(|_| self.list_selector.scroll_down()),
+            Action::Select => {
                 if let Some(e) = self.list_selector.play() {
                     self.activate(e);
                 }
-                EventResponse::None
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                SoundAction::Plus.apply_sound_action(self);
-                EventResponse::None
+            Action::VolumeUp => (0..count).for_each(|_| SoundAction::Plus.apply_sound_action(self)),
+            Action::VolumeDown => {
+                (0..count).for_each(|_| SoundAction::Minus.apply_sound_action(self))
             }
-            KeyCode::Char('-') => {
-                SoundAction::Minus.apply_sound_action(self);
-                EventResponse::None
+            Action::SeekBackward => {
+                (0..count).for_each(|_| SoundAction::Backward.apply_sound_action(self))
             }
-            KeyCode::Char('<') | KeyCode::Left | KeyCode::Char('h') => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    SoundAction::Previous(1).apply_sound_action(self);
-                } else {
-                    SoundAction::Backward.apply_sound_action(self);
-                }
-                EventResponse::None
+            Action::SeekForward => {
+                (0..count).for_each(|_| SoundAction::Forward.apply_sound_action(self))
             }
-            KeyCode::Char('>') | KeyCode::Right | KeyCode::Char('l') => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    SoundAction::Next(1).apply_sound_action(self);
-                } else {
-                    SoundAction::Forward.apply_sound_action(self);
-                }
-                EventResponse::None
+            Action::PreviousSong => SoundAction::Previous(count).apply_sound_action(self),
+            Action::NextSong => SoundAction::Next(count).apply_sound_action(self),
+            Action::RemoveSong => {
+                (0..count).for_each(|_| SoundAction::DeleteVideoUnary.apply_sound_action(self))
             }
-            KeyCode::Char('r') => {
-                SoundAction::DeleteVideoUnary.apply_sound_action(self);
-                EventResponse::None
-            }
-            _ => EventResponse::None,
+            Action::Quit | Action::SelectInBackground => {}
         }
+        EventResponse::None
     }
 
     fn render(&mut self, f: &mut ratatui::Frame) {

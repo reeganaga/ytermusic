@@ -1,6 +1,5 @@
 use std::sync::atomic::AtomicBool;
 
-use crossterm::event::{KeyCode, KeyEvent};
 use flume::Sender;
 use ratatui::{layout::Rect, style::Style, Frame};
 use ytpapi2::YoutubeMusicVideoRef;
@@ -14,6 +13,7 @@ use crate::{
 };
 
 use super::{
+    action::Action,
     item_list::{ListItem, ListItemAction},
     EventResponse, ManagerMessage, Screen, Screens,
 };
@@ -96,8 +96,8 @@ impl Screen for Chooser {
         }
     }
 
-    fn on_key_press(&mut self, key: KeyEvent, _: &Rect) -> EventResponse {
-        if let Some(ChooserAction::Play(a)) = self.item_list.on_key_press(key).cloned() {
+    fn on_action(&mut self, action: Action, count: usize, _: &Rect) -> EventResponse {
+        if let Some(ChooserAction::Play(a)) = self.item_list.on_action(action, count).cloned() {
             if PLAYER_RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
                 return EventResponse::Message(vec![ManagerMessage::Inspect(
                     a.name,
@@ -109,12 +109,11 @@ impl Screen for Chooser {
             self.play(&a);
             return EventResponse::Message(vec![ManagerMessage::ChangeState(Screens::MusicPlayer)]);
         }
-        match key.code {
-            KeyCode::Esc => return ManagerMessage::ChangeState(Screens::MusicPlayer).event(),
-            KeyCode::Char('f') => return ManagerMessage::SearchFrom(Screens::Playlist).event(),
-            _ => {}
+        match action {
+            Action::Back => ManagerMessage::ChangeState(Screens::MusicPlayer).event(),
+            Action::OpenSearch => ManagerMessage::SearchFrom(Screens::Playlist).event(),
+            _ => EventResponse::None,
         }
-        EventResponse::None
     }
 
     fn render(&mut self, frame: &mut Frame) {

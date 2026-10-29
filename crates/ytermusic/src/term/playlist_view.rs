@@ -1,4 +1,3 @@
-use crossterm::event::{KeyCode, KeyEvent};
 use flume::Sender;
 use ratatui::{layout::Rect, style::Style, Frame};
 use ytpapi2::YoutubeMusicVideoRef;
@@ -11,6 +10,7 @@ use crate::{
 };
 
 use super::{
+    action::Action,
     item_list::{ListItem, ListItemAction},
     EventResponse, ManagerMessage, Screen, Screens,
 };
@@ -56,8 +56,8 @@ impl Screen for PlaylistView {
         }
     }
 
-    fn on_key_press(&mut self, key: KeyEvent, _: &Rect) -> EventResponse {
-        if let Some(PlayListAction(v, _)) = self.items.on_key_press(key) {
+    fn on_action(&mut self, action: Action, count: usize, _: &Rect) -> EventResponse {
+        if let Some(PlayListAction(v, _)) = self.items.on_action(action, count) {
             self.sender
                 .send(SoundAction::ReplaceQueue(
                     self.videos.iter().skip(*v).cloned().collect(),
@@ -65,9 +65,9 @@ impl Screen for PlaylistView {
                 .unwrap();
             return EventResponse::Message(vec![ManagerMessage::PlayerFrom(Screens::Playlist)]);
         }
-        match key.code {
-            KeyCode::Esc => ManagerMessage::ChangeState(self.goto).event(),
-            KeyCode::Char('f') => ManagerMessage::SearchFrom(Screens::PlaylistViewer).event(),
+        match action {
+            Action::Back => ManagerMessage::ChangeState(self.goto).event(),
+            Action::OpenSearch => ManagerMessage::SearchFrom(Screens::PlaylistViewer).event(),
             _ => EventResponse::None,
         }
     }

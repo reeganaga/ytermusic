@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
+use crossterm::event::MouseEventKind;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListState, StatefulWidget, Widget},
 };
 
-use super::{rect_contains, relative_pos};
+use super::{action, rect_contains, relative_pos};
 
 pub trait ListItemAction {
     fn render_style(&self, string: &str, selected: bool) -> Style;
@@ -65,15 +65,11 @@ impl<Action: Clone> ListItem<Action> {
         None
     }
 
-    pub fn on_key_press(&mut self, key: KeyEvent) -> Option<&Action> {
-        match key.code {
-            KeyCode::Enter => {
-                if let Some(a) = self.select() {
-                    return Some(a);
-                }
-            }
-            KeyCode::Char('+') | KeyCode::Up | KeyCode::Char('k') => self.select_up(),
-            KeyCode::Char('-') | KeyCode::Down | KeyCode::Char('j') => self.select_down(),
+    pub fn on_action(&mut self, input: action::Action, count: usize) -> Option<&Action> {
+        match input {
+            action::Action::Select => return self.select(),
+            action::Action::Up => (0..count).for_each(|_| self.select_up()),
+            action::Action::Down => (0..count).for_each(|_| self.select_down()),
             _ => {}
         }
         None

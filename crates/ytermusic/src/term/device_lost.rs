@@ -1,4 +1,3 @@
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Alignment, Rect},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -7,7 +6,7 @@ use ratatui::{
 
 use crate::consts::CONFIG;
 
-use super::{EventResponse, ManagerMessage, Screen, Screens};
+use super::{action::Action, EventResponse, ManagerMessage, Screen, Screens};
 
 // Audio device not connected!
 pub struct DeviceLost(pub Vec<String>, pub Option<ManagerMessage>);
@@ -17,9 +16,9 @@ impl Screen for DeviceLost {
         EventResponse::None
     }
 
-    fn on_key_press(&mut self, key: KeyEvent, _: &Rect) -> EventResponse {
-        match key.code {
-            KeyCode::Enter | KeyCode::Char(' ') => {
+    fn on_action(&mut self, action: Action, _: usize, _: &Rect) -> EventResponse {
+        match action {
+            Action::Select => {
                 if let Some(m) = self.1.take() {
                     EventResponse::Message(vec![m])
                 } else {
@@ -28,7 +27,6 @@ impl Screen for DeviceLost {
                         .event()
                 }
             }
-            KeyCode::Esc => ManagerMessage::Quit.event(),
             _ => EventResponse::None,
         }
     }
