@@ -151,6 +151,7 @@ The `[lyrics]` section of `config.toml`:
 romanize = true      # show romanization under non-latin lyrics (R toggles and saves it)
 translate = true     # show the translation under each line (T toggles and saves it)
 translate_to = "en"  # language of the translation: "en", "id", "fr", "es"...
+animate = true       # slide between lines and fade the highlight (false: jump, less redraws)
 ```
 
 Translation and romanization use Google Translate's public web endpoint (the one used by

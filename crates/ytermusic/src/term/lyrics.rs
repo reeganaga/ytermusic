@@ -14,7 +14,11 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use flume::{Receiver, Sender};
 use log::{error, info};
 use lyrics::{lrc, Cache, HttpClient, Lyrics, Source, Track, Translation};
-use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use ytpapi2::{YoutubeMusicInstance, YoutubeMusicVideoRef};
 
@@ -27,13 +31,17 @@ use crate::{
 };
 
 use super::{
-    widgets::{accent, dim, hint, pad, panel, parse_duration, text, Hint},
+    widgets::{dim, hint, pad, panel, parse_duration, theme, Hint},
     Ctx, EventResponse, ManagerMessage, Screen,
 };
 
 /// Auto-scroll resumes after this long without scrolling by hand.
 const MANUAL_SCROLL_TIMEOUT: Duration = Duration::from_secs(5);
 const OFFSET_STEP_MS: i64 = 500;
+/// Time to slide to the next line (`animate = true`)
+const SCROLL_DURATION: Duration = Duration::from_millis(220);
+/// Time for a line to fade in / out of the highlight
+const FADE_DURATION: Duration = Duration::from_millis(300);
 
 enum State {
     /// Nothing playing
@@ -64,6 +72,16 @@ pub struct LyricsView {
     manual: Option<(usize, Instant)>,
     top: usize,
     max_top: usize,
+    /// Wrapped rows of the lyrics, rebuilt when the lyrics, toggles or width change
+    layout: Option<Layout>,
+    animate: bool,
+    /// Displayed first row; fractional while sliding
+    scroll: f32,
+    /// Slide in progress: from, to, start
+    scroll_anim: Option<(f32, usize, Instant)>,
+    last_active: Option<usize>,
+    /// Highlight fade in progress: line losing the highlight, start
+    fade: Option<(Option<usize>, Instant)>,
     sender: Sender<Update>,
     receiver: Receiver<Update>,
     client: HttpClient,
@@ -85,6 +103,12 @@ impl LyricsView {
             manual: None,
             top: 0,
             max_top: 0,
+            layout: None,
+            animate: CONFIG.lyrics.animate,
+            scroll: 0.0,
+            scroll_anim: None,
+            last_active: None,
+            fade: None,
             sender,
             receiver,
             client: lyrics::http_client(),
@@ -107,6 +131,11 @@ impl LyricsView {
             self.video_id = current.map(|x| x.video_id.clone());
             self.offset_ms = 0;
             self.manual = None;
+            self.layout = None;
+            self.scroll = 0.0;
+            self.scroll_anim = None;
+            self.last_active = None;
+            self.fade = None;
             self.translating = false;
             self.translate_failed = false;
             self.state = match current {
@@ -132,6 +161,7 @@ impl LyricsView {
     }
 
     fn apply(&mut self, update: Update) {
+        self.layout = None;
         match update {
             Update::Lyrics(id, lyrics) if Some(&id) == self.video_id.as_ref() => {
                 self.state = match lyrics {
@@ -227,6 +257,7 @@ impl LyricsView {
             self.translate = !self.translate;
             ("Translation", self.translate)
         };
+        self.layout = None;
         let mut notice = format!("{name} {}", if on { "on" } else { "off" });
         if let Err(e) = config::save_lyrics_toggles(self.romanize, self.translate) {
             error!("Can't save lyrics toggles: {e}");
@@ -254,8 +285,8 @@ impl LyricsView {
         title
     }
 
-    /// Lines to draw (already wrapped) and the first row of each lyric line.
-    fn rows(&self, lyrics: &Lyrics, active: Option<usize>, width: usize) -> Rows {
+    /// Wrapped rows of every lyric line with its romanization and translation.
+    fn build_layout(&self, lyrics: &Lyrics, width: usize) -> Layout {
         let translation = lyrics.translations.get(Self::target());
         let romanized = translation.map(|t| &t.romanized).filter(|_| self.romanize);
         let translated = translation
@@ -263,42 +294,118 @@ impl LyricsView {
             .filter(|_| self.translate);
         let spaced = (0..lyrics.lines.len())
             .any(|i| extra(romanized, i).is_some() || extra(translated, i).is_some());
-        let synced = lyrics.synced();
 
-        let mut rows = Rows::default();
+        let mut layout = Layout {
+            width,
+            ..Default::default()
+        };
         for (i, line) in lyrics.lines.iter().enumerate() {
             if spaced && i > 0 {
-                rows.lines.push((String::new(), Style::new()));
+                layout.rows.push((String::new(), RowKind::Blank, i));
             }
-            rows.starts.push(rows.lines.len());
-            let is_active = active == Some(i);
-            let past = synced && active.is_some_and(|a| i < a);
-            let main_style = if is_active {
-                accent().add_modifier(Modifier::BOLD)
-            } else if past {
-                dim()
-            } else {
-                text()
-            };
-            let extra_style = if is_active { text() } else { dim() };
+            layout.starts.push(layout.rows.len());
             let original = if line.text.is_empty() {
                 "♪".to_owned()
             } else {
                 to_bidi_string(&line.text)
             };
-            rows.push_wrapped(&original, width, main_style);
+            layout.push_wrapped(&original, RowKind::Main, i);
             if let Some(romanized) = extra(romanized, i) {
-                rows.push_wrapped(romanized, width, extra_style);
+                layout.push_wrapped(romanized, RowKind::Romanized, i);
             }
             if let Some(translated) = extra(translated, i) {
-                rows.push_wrapped(
-                    translated,
-                    width,
-                    extra_style.add_modifier(Modifier::ITALIC),
-                );
+                layout.push_wrapped(translated, RowKind::Translated, i);
             }
         }
-        rows
+        layout
+    }
+
+    /// Style of a row given the active line and how far its fade is (0 to 1).
+    fn row_style(&self, kind: RowKind, line: usize, active: Option<usize>, synced: bool) -> Style {
+        let t = theme();
+        let progress = self.fade_progress();
+        let leaving = self.fade.is_some_and(|(prev, _)| prev == Some(line));
+        let fg = match kind {
+            RowKind::Blank => t.text,
+            RowKind::Main if !synced => t.text,
+            RowKind::Main if active == Some(line) => lerp(t.text, t.accent, progress),
+            RowKind::Main if leaving => lerp(t.accent, t.text_dim, progress),
+            RowKind::Main if active.is_some_and(|a| line < a) => t.text_dim,
+            RowKind::Main => t.text,
+            _ if active == Some(line) => lerp(t.text_dim, t.text, progress),
+            _ if leaving => lerp(t.text, t.text_dim, progress),
+            _ => t.text_dim,
+        };
+        let mut style = Style::new().fg(fg);
+        if kind == RowKind::Main && active == Some(line) {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if kind == RowKind::Translated {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        style
+    }
+
+    fn fade_progress(&self) -> f32 {
+        match self.fade {
+            Some((_, start)) => {
+                (start.elapsed().as_secs_f32() / FADE_DURATION.as_secs_f32()).min(1.0)
+            }
+            None => 1.0,
+        }
+    }
+
+    /// Starts a fade when the active line changes and ends finished ones.
+    fn update_fade(&mut self, active: Option<usize>) {
+        if active != self.last_active {
+            self.fade = self.animate.then(|| (self.last_active, Instant::now()));
+            self.last_active = active;
+        }
+        if self.fade_progress() >= 1.0 {
+            self.fade = None;
+        }
+    }
+
+    /// Moves the displayed first row toward `target`, sliding when animated.
+    fn update_scroll(&mut self, target: usize, height: usize) {
+        let jump = self.manual.is_some()
+            || !self.animate
+            || (self.scroll - target as f32).abs() > height as f32;
+        if jump {
+            self.scroll = target as f32;
+            self.scroll_anim = None;
+            return;
+        }
+        if self.scroll_anim.is_none_or(|(_, to, _)| to != target)
+            && (self.scroll - target as f32).abs() > 0.01
+        {
+            self.scroll_anim = Some((self.scroll, target, Instant::now()));
+        }
+        if let Some((from, to, start)) = self.scroll_anim {
+            let t = start.elapsed().as_secs_f32() / SCROLL_DURATION.as_secs_f32();
+            if t >= 1.0 {
+                self.scroll = to as f32;
+                self.scroll_anim = None;
+            } else {
+                self.scroll = from + (to as f32 - from) * ease_out_cubic(t);
+            }
+        }
+    }
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Color between `from` and `to`; non-RGB colors switch halfway.
+fn lerp(from: Color, to: Color, t: f32) -> Color {
+    match (from, to) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+            Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+        }
+        _ if t < 0.5 => from,
+        _ => to,
     }
 }
 
@@ -307,16 +414,27 @@ fn extra(list: Option<&Vec<Option<String>>>, i: usize) -> Option<&str> {
     list.and_then(|x| x.get(i)).and_then(|x| x.as_deref())
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RowKind {
+    Blank,
+    Main,
+    Romanized,
+    Translated,
+}
+
 #[derive(Default)]
-struct Rows {
-    lines: Vec<(String, Style)>,
+struct Layout {
+    width: usize,
+    /// Text, kind and lyric line index of every row
+    rows: Vec<(String, RowKind, usize)>,
+    /// First row of each lyric line
     starts: Vec<usize>,
 }
 
-impl Rows {
-    fn push_wrapped(&mut self, text: &str, width: usize, style: Style) {
-        for part in wrap(text, width) {
-            self.lines.push((part, style));
+impl Layout {
+    fn push_wrapped(&mut self, text: &str, kind: RowKind, line: usize) {
+        for part in wrap(text, self.width) {
+            self.rows.push((part, kind, line));
         }
     }
 }
@@ -421,9 +539,15 @@ impl Screen for LyricsView {
                 lrc::active_line(&lyrics.times(), position.max(0) as u64)
             })
             .flatten();
-        let rows = self.rows(lyrics, active, content.width as usize);
+        let width = content.width as usize;
+        if self.layout.as_ref().is_none_or(|l| l.width != width) {
+            self.layout = Some(self.build_layout(lyrics, width));
+        }
+        let Some(layout) = self.layout.take() else {
+            return;
+        };
         let height = content.height as usize;
-        self.max_top = rows.lines.len().saturating_sub(height);
+        self.max_top = layout.rows.len().saturating_sub(height);
 
         // Hand scrolling wins for a few seconds (for good on unsynced lyrics)
         if let Some((_, at)) = self.manual {
@@ -431,24 +555,32 @@ impl Screen for LyricsView {
                 self.manual = None;
             }
         }
-        self.top = match self.manual {
+        let target = match self.manual {
             Some((top, _)) => top,
             None => active
-                .and_then(|a| rows.starts.get(a))
+                .and_then(|a| layout.starts.get(a))
                 .map(|start| start.saturating_sub(height / 3))
                 .unwrap_or(0),
         }
         .min(self.max_top);
+        self.update_scroll(target, height);
+        self.update_fade(active);
+        self.top = (self.scroll.round() as usize).min(self.max_top);
 
-        for (i, (line, style)) in rows.lines.iter().skip(self.top).take(height).enumerate() {
+        for (i, (line, kind, index)) in layout.rows.iter().skip(self.top).take(height).enumerate() {
             buf.set_stringn(
                 content.x,
                 content.y + i as u16,
                 line,
-                content.width as usize,
-                *style,
+                width,
+                self.row_style(*kind, *index, active, synced),
             );
         }
+        self.layout = Some(layout);
+    }
+
+    fn animating(&self) -> bool {
+        self.scroll_anim.is_some() || self.fade.is_some()
     }
 
     fn hints(&self, _: &Ctx) -> Vec<Hint> {
@@ -470,7 +602,21 @@ impl Screen for LyricsView {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap;
+    use super::{ease_out_cubic, lerp, wrap};
+    use ratatui::style::Color;
+
+    #[test]
+    fn animation_helpers() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert!(ease_out_cubic(0.5) > 0.5);
+        let (a, b) = (Color::Rgb(0, 100, 200), Color::Rgb(100, 200, 0));
+        assert_eq!(lerp(a, b, 0.0), a);
+        assert_eq!(lerp(a, b, 0.5), Color::Rgb(50, 150, 100));
+        assert_eq!(lerp(a, b, 1.0), b);
+        assert_eq!(lerp(Color::Red, Color::Blue, 0.4), Color::Red);
+        assert_eq!(lerp(Color::Red, Color::Blue, 0.6), Color::Blue);
+    }
 
     #[test]
     fn wraps_words_and_cjk() {

@@ -66,6 +66,11 @@ pub trait Screen {
     }
     fn hints(&self, ctx: &Ctx) -> Vec<Hint>;
     fn open(&mut self) {}
+    /// Whether an animation is running: the screen is then redrawn at
+    /// `ANIMATION_FRAME` instead of the normal tick.
+    fn animating(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +115,8 @@ pub enum Screens {
 }
 
 const NOTICE_DURATION: Duration = Duration::from_secs(4);
+/// Redraw interval while a screen animates (~30 fps)
+const ANIMATION_FRAME: Duration = Duration::from_millis(33);
 
 // The screen manager that handles the different screens
 pub struct Manager {
@@ -520,7 +527,12 @@ impl Manager {
                 self.render(f);
             })?;
 
-            let timeout = tick_rate
+            let frame = if self.with_screen(|s, _| s.animating()) {
+                ANIMATION_FRAME
+            } else {
+                tick_rate
+            };
+            let timeout = frame
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or_else(|| Duration::from_secs(0));
             if crossterm::event::poll(timeout)? {
@@ -533,7 +545,7 @@ impl Manager {
                     break;
                 }
             }
-            if last_tick.elapsed() >= tick_rate {
+            if last_tick.elapsed() >= frame {
                 last_tick = Instant::now();
             }
         }

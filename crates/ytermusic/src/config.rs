@@ -263,6 +263,10 @@ pub struct LyricsConfig {
     /// Language code of the translation: "en", "id", "fr", "ja"...
     #[serde(default = "default_translate_to")]
     pub translate_to: String,
+    /// Slide to the next line and fade the highlight instead of jumping.
+    /// Redraws at ~30 fps while animating; turn off on slow terminals / SSH.
+    #[serde(default = "default_true")]
+    pub animate: bool,
 }
 
 impl Default for LyricsConfig {
@@ -271,6 +275,7 @@ impl Default for LyricsConfig {
             romanize: true,
             translate: true,
             translate_to: default_translate_to(),
+            animate: true,
         }
     }
 }
