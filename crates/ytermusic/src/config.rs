@@ -248,6 +248,37 @@ fn theme_error() -> Color {
     Color::Rgb(0xf8, 0x51, 0x49)
 }
 
+/// Lyrics panel (`y` on the player screen).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[non_exhaustive]
+pub struct LyricsConfig {
+    /// Show the romanization (romaji, pinyin...) under non-latin lyrics.
+    /// Toggled with `R`, which saves the new value here.
+    #[serde(default = "default_true")]
+    pub romanize: bool,
+    /// Show the translation under each line. Toggled with `T`, which saves
+    /// the new value here.
+    #[serde(default = "default_true")]
+    pub translate: bool,
+    /// Language code of the translation: "en", "id", "fr", "ja"...
+    #[serde(default = "default_translate_to")]
+    pub translate_to: String,
+}
+
+impl Default for LyricsConfig {
+    fn default() -> Self {
+        Self {
+            romanize: true,
+            translate: true,
+            translate_to: default_translate_to(),
+        }
+    }
+}
+
+fn default_translate_to() -> String {
+    "en".to_owned()
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[non_exhaustive]
 pub struct PlaylistConfig {}
@@ -270,6 +301,8 @@ pub struct Config {
     pub search: SearchConfig,
     #[serde(default)]
     pub theme: ThemeConfig,
+    #[serde(default)]
+    pub lyrics: LyricsConfig,
 }
 
 impl Config {
@@ -302,4 +335,46 @@ impl Config {
         };
         opt().unwrap_or_default()
     }
+}
+
+/// Saves the lyrics toggles in `config.toml`, keeping the rest of the file
+/// (comments, formatting) untouched.
+pub fn save_lyrics_toggles(romanize: bool, translate: bool) -> Result<(), String> {
+    let dirs = get_project_dirs().ok_or("no config directory")?;
+    let path = dirs.config_dir().join("config.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = with_lyrics_toggles(&text, romanize, translate)?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())
+}
+
+fn with_lyrics_toggles(config: &str, romanize: bool, translate: bool) -> Result<String, String> {
+    let mut doc = config
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| e.to_string())?;
+    let lyrics = doc
+        .entry("lyrics")
+        .or_insert_with(toml_edit::table)
+        .as_table_like_mut()
+        .ok_or("[lyrics] is not a table")?;
+    lyrics.insert("romanize", toml_edit::value(romanize));
+    lyrics.insert("translate", toml_edit::value(translate));
+    Ok(doc.to_string())
+}
+
+#[test]
+fn lyrics_toggles_keep_the_rest_of_the_config() {
+    let config = "# my config\n[player]\ninitial_volume = 30 # quiet\n";
+    let saved = with_lyrics_toggles(config, false, true).unwrap();
+    assert!(saved.starts_with(config));
+    let parsed: Config = toml::from_str(&saved).unwrap();
+    assert!(!parsed.lyrics.romanize);
+    assert!(parsed.lyrics.translate);
+    assert_eq!(parsed.lyrics.translate_to, "en");
+    assert_eq!(parsed.player.initial_volume, 30);
+
+    let config = "[lyrics]\ntranslate_to = \"id\" # indonesian\nromanize = true\n";
+    let saved = with_lyrics_toggles(config, false, false).unwrap();
+    assert!(saved.contains("translate_to = \"id\" # indonesian"));
+    let parsed: Config = toml::from_str(&saved).unwrap();
+    assert!(!parsed.lyrics.romanize && !parsed.lyrics.translate);
 }

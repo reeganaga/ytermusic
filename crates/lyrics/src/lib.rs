@@ -19,6 +19,7 @@ pub mod title;
 pub mod translate;
 
 pub use lrclib::Track;
+pub use reqwest::Client as HttpClient;
 pub use translate::Translation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +92,7 @@ impl Lyrics {
 }
 
 /// HTTP client for LRCLIB and Google Translate.
-pub fn http_client() -> reqwest::Client {
+pub fn http_client() -> HttpClient {
     reqwest::Client::builder()
         .user_agent(concat!(
             "ytermusic/",

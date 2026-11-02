@@ -1,6 +1,7 @@
 pub mod chrome;
 pub mod device_lost;
 pub mod library;
+pub mod lyrics;
 pub mod playlist_view;
 pub mod queue;
 pub mod search;
@@ -36,11 +37,12 @@ use self::{
     chrome::{Button, FrameLayout},
     device_lost::DeviceLost,
     library::{Library, PlaylistEntry},
+    lyrics::LyricsView,
     playlist_view::PlaylistView,
     queue::QueueView,
     search::Search,
     sidebar::{NavItem, Sidebar},
-    widgets::Hint,
+    widgets::{hint, Hint},
 };
 
 /// What a screen can read while handling events or rendering.
@@ -113,6 +115,9 @@ const NOTICE_DURATION: Duration = Duration::from_secs(4);
 pub struct Manager {
     player: PlayerState,
     queue: QueueView,
+    lyrics: LyricsView,
+    /// The player screen shows the lyrics instead of the queue
+    show_lyrics: bool,
     library: Library,
     search: Search,
     viewer: PlaylistView,
@@ -131,11 +136,14 @@ pub struct Manager {
 impl Manager {
     pub async fn new(action_sender: Sender<SoundAction>, player: PlayerState) -> Self {
         let updater = player.updater.clone();
+        let search = Search::new(action_sender.clone(), updater).await;
         Self {
             queue: QueueView::new(action_sender.clone()),
+            lyrics: LyricsView::new(search.api()),
+            show_lyrics: false,
             library: Library::new(),
-            viewer: PlaylistView::new(action_sender.clone()),
-            search: Search::new(action_sender, updater).await,
+            viewer: PlaylistView::new(action_sender),
+            search,
             device_lost: DeviceLost(Vec::new(), None),
             current: Screens::Player,
             history: Vec::new(),
@@ -152,6 +160,7 @@ impl Manager {
 
     fn screen_mut(&mut self, screen: Screens) -> &mut dyn Screen {
         match screen {
+            Screens::Player if self.show_lyrics => &mut self.lyrics,
             Screens::Player => &mut self.queue,
             Screens::Library => &mut self.library,
             Screens::Search => &mut self.search,
@@ -168,6 +177,7 @@ impl Manager {
             narrow: self.layout.narrow,
         };
         let screen: &mut dyn Screen = match self.current {
+            Screens::Player if self.show_lyrics => &mut self.lyrics,
             Screens::Player => &mut self.queue,
             Screens::Library => &mut self.library,
             Screens::Search => &mut self.search,
@@ -253,6 +263,14 @@ impl Manager {
             KeyCode::Char('3') | KeyCode::Char('/') | KeyCode::Char('f') => {
                 self.set_current_screen(Screens::Search, true);
                 self.search.focus_input();
+            }
+            KeyCode::Char('y') => {
+                if self.current == Screens::Player {
+                    self.show_lyrics = !self.show_lyrics;
+                } else {
+                    self.show_lyrics = true;
+                    self.set_current_screen(Screens::Player, true);
+                }
             }
             KeyCode::Char('s') => {
                 self.sidebar_visible = !self.sidebar_visible;
@@ -453,10 +471,15 @@ impl Manager {
         }
         self.layout.narrow = layout.narrow;
         let main = layout.main;
-        let hints = self.with_screen(|s, ctx| {
+        let mut hints = self.with_screen(|s, ctx| {
             s.render(buf, main, ctx);
             s.hints(ctx)
         });
+        // The lyrics panel has its own "y queue" hint
+        let lyrics_shown = self.current == Screens::Player && self.show_lyrics;
+        if self.current != Screens::DeviceLost && !lyrics_shown {
+            hints.insert(hints.len().min(1), hint("y", "lyrics", "lyr"));
+        }
         #[cfg(feature = "thumbnails")]
         let art_width = if self.thumbnail.active() { 6 } else { 5 };
         #[cfg(not(feature = "thumbnails"))]

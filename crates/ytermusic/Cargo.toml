@@ -45,6 +45,7 @@ mimalloc = { version = "0.1.39", default-features = false }
 
 #  --- Config ---
 toml = "0.8.11"
+toml_edit = "0.22"
 
 #  --- Logging ---
 log = "0.4.21"
@@ -52,6 +53,7 @@ log = "0.4.21"
 #  --- Database ---
 database.workspace = true
 download-manager.workspace = true
+lyrics.workspace = true
 common-structs.workspace = true
 
 # -- Cookies auto retreival --

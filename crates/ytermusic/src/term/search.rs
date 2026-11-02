@@ -58,7 +58,8 @@ struct Results {
 
 /// Keys that act as commands while the results have the focus.
 const RESULT_COMMANDS: &[char] = &[
-    'm', 'j', 'k', 'q', 's', 'x', 'r', ' ', '+', '-', '=', '<', '>', '1', '2', '3', '/', 'g', 'G',
+    'm', 'j', 'k', 'q', 's', 'x', 'r', 'y', ' ', '+', '-', '=', '<', '>', '1', '2', '3', '/', 'g',
+    'G',
 ];
 
 pub struct Search {
@@ -127,6 +128,11 @@ impl Search {
             updater,
             added: HashSet::new(),
         }
+    }
+
+    /// YouTube Music client, if the cookies were valid.
+    pub fn api(&self) -> Option<Arc<YoutubeMusicInstance>> {
+        self.api.clone()
     }
 
     pub fn focus_input(&mut self) {
