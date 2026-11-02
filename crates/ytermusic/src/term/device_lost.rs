@@ -1,55 +1,45 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
+    buffer::Buffer,
     layout::{Alignment, Rect},
-    widgets::{Block, BorderType, Borders, Paragraph},
-    Frame,
+    widgets::{Paragraph, Widget, Wrap},
 };
 
-use crate::consts::CONFIG;
+use super::{
+    widgets::{error, hint, pad, panel, Hint},
+    Ctx, EventResponse, ManagerMessage, Screen,
+};
 
-use super::{EventResponse, ManagerMessage, Screen, Screens};
-
-// Audio device not connected!
+/// Error screen (audio device lost, invalid cookies, ...).
 pub struct DeviceLost(pub Vec<String>, pub Option<ManagerMessage>);
 
 impl Screen for DeviceLost {
-    fn on_mouse_press(&mut self, _: crossterm::event::MouseEvent, _: &Rect) -> EventResponse {
-        EventResponse::None
-    }
-
-    fn on_key_press(&mut self, key: KeyEvent, _: &Rect) -> EventResponse {
+    fn on_key(&mut self, key: KeyEvent, _: &Ctx) -> Option<EventResponse> {
         match key.code {
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if let Some(m) = self.1.take() {
-                    EventResponse::Message(vec![m])
-                } else {
-                    ManagerMessage::RestartPlayer
-                        .pass_to(Screens::MusicPlayer)
-                        .event()
-                }
-            }
-            KeyCode::Esc => ManagerMessage::Quit.event(),
-            _ => EventResponse::None,
+            KeyCode::Enter | KeyCode::Char(' ') => Some(if let Some(m) = self.1.take() {
+                EventResponse::Message(vec![m])
+            } else {
+                ManagerMessage::RestartPlayer.event()
+            }),
+            KeyCode::Esc | KeyCode::Char('q') => Some(ManagerMessage::Quit.event()),
+            _ => None,
         }
     }
 
-    fn render(&mut self, frame: &mut Frame) {
-        frame.render_widget(
-            Paragraph::new(format!(
-                "{}\nPress [Enter] or [Space] to retry.\nOr [Esc] to exit",
-                self.0.join("\n")
-            ))
-            .style(CONFIG.player.text_error_style)
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .style(CONFIG.player.text_next_style)
-                    .title(" Error ")
-                    .border_type(BorderType::Plain),
-            ),
-            frame.area(),
-        );
+    fn on_mouse(&mut self, _: MouseEvent, _: Rect, _: &Ctx) -> EventResponse {
+        EventResponse::None
+    }
+
+    fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &Ctx) {
+        let inner = pad(panel(buf, area, "Error", ctx.focused), 2, 1);
+        Paragraph::new(format!(
+            "{}\n\nPress [Enter] or [Space] to retry.\nOr [Esc] to exit",
+            self.0.join("\n")
+        ))
+        .style(error())
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false })
+        .render(inner, buf);
     }
 
     fn handle_global_message(&mut self, m: ManagerMessage) -> EventResponse {
@@ -57,18 +47,13 @@ impl Screen for DeviceLost {
             ManagerMessage::Error(a, m) => {
                 self.1 = *m;
                 self.0.push(a);
-                EventResponse::Message(vec![ManagerMessage::ChangeState(Screens::DeviceLost)])
+                ManagerMessage::ChangeState(super::Screens::DeviceLost).event()
             }
             _ => EventResponse::None,
         }
     }
 
-    fn close(&mut self, _: Screens) -> EventResponse {
-        self.0.clear();
-        EventResponse::None
-    }
-
-    fn open(&mut self) -> EventResponse {
-        EventResponse::None
+    fn hints(&self, _: &Ctx) -> Vec<Hint> {
+        vec![hint("↵", "retry", "retry"), hint("esc", "quit", "quit")]
     }
 }

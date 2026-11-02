@@ -1,6 +1,8 @@
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum MusicDownloadStatus {
     NotDownloaded,
+    /// Explicitly requested for download, waiting for a free worker.
+    Queued,
     Downloaded,
     Downloading(usize),
     DownloadFailed,
@@ -17,6 +19,7 @@ impl MusicDownloadStatus {
                 }
             }
             Self::Downloaded => ' ',
+            Self::Queued => return "queued".to_owned(),
             Self::Downloading(progress) => return format!("⭳ [{:02}%]", progress),
             Self::DownloadFailed => '⚠',
         }

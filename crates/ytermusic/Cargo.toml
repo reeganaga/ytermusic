@@ -27,6 +27,7 @@ varuint = "0.7.1"
 crossterm = "0.29.0"
 ratatui = { version = "0.30.2", features = ["serde"] }
 unicode-bidi = "0.3"
+unicode-width = "0.2"
 
 #  --- Player ---
 player.workspace = true
@@ -55,6 +56,8 @@ ctrlc = "3.5.0"
 
 [features]
 rusty-ytdl-backend = ["download-manager/rusty-ytdl-backend"]
+# Show the album art of the playing song (kitty / sixel / iTerm2 terminals)
+thumbnails = []
 
 [target."cfg(target_os = \"windows\")".dependencies]
 raw-window-handle = "0.4.3"

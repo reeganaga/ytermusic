@@ -30,9 +30,25 @@ pub enum SoundAction {
     Next(usize),
     AddVideosToQueue(Vec<YoutubeMusicVideoRef>),
     AddVideoUnary(YoutubeMusicVideoRef),
-    DeleteVideoUnary,
-    ReplaceQueue(Vec<YoutubeMusicVideoRef>),
+    /// Remove the song at this queue index (and its downloaded file)
+    RemoveIndex(usize),
+    /// Replace the whole queue and start playing at the given index
+    PlayList(Vec<YoutubeMusicVideoRef>, usize),
+    /// Jump to the song at this queue index (toggles pause if already current)
+    PlayIndex(usize),
+    ToggleShuffle,
+    CycleRepeat,
+    /// Download songs without adding them to the queue
+    Download(Vec<YoutubeMusicVideoRef>),
     VideoStatusUpdate(String, MusicDownloadStatus),
+}
+
+fn downloaded_status(video_id: &str) -> MusicDownloadStatus {
+    if DATABASE.contains(video_id) {
+        MusicDownloadStatus::Downloaded
+    } else {
+        MusicDownloadStatus::NotDownloaded
+    }
 }
 
 impl SoundAction {
@@ -62,8 +78,9 @@ impl SoundAction {
             Self::PlayPause => player.sink.toggle_playback(),
             Self::Cleanup => {
                 player.list.clear();
+                player.original_order = None;
                 player.current = 0;
-                player.music_status.clear();
+                player.keep_only_explicit_statuses();
                 player.sink.stop();
             }
             Self::Plus => player.sink.volume_up(),
@@ -77,18 +94,63 @@ impl SoundAction {
                 player.music_status.insert(video, status);
             }
             Self::AddVideosToQueue(video) => {
-                let db = DATABASE.read().unwrap();
                 for v in video {
-                    Self::insert(
-                        player,
-                        v.video_id.clone(),
-                        if db.iter().any(|e| e.video_id == v.video_id) {
-                            MusicDownloadStatus::Downloaded
-                        } else {
-                            MusicDownloadStatus::NotDownloaded
-                        },
-                    );
+                    Self::insert(player, v.video_id.clone(), downloaded_status(&v.video_id));
+                    if let Some(original) = player.original_order.as_mut() {
+                        original.push(v.clone());
+                    }
                     player.list.push(v)
+                }
+            }
+            Self::PlayList(videos, start) => {
+                Self::Cleanup.apply_sound_action(player);
+                DOWNLOAD_MANAGER.clean(
+                    ShutdownSignal,
+                    download_manager_handler(player.soundaction_sender.clone()),
+                );
+                player.reset_download_list();
+                Self::AddVideosToQueue(videos).apply_sound_action(player);
+                player.current = start.min(player.list.len().saturating_sub(1));
+                if player.shuffle {
+                    player.original_order = Some(player.list.clone());
+                    player.shuffle_upcoming();
+                }
+            }
+            Self::PlayIndex(index) => match index.cmp(&player.current) {
+                std::cmp::Ordering::Less => {
+                    Self::Previous(player.current - index).apply_sound_action(player)
+                }
+                std::cmp::Ordering::Equal => Self::PlayPause.apply_sound_action(player),
+                std::cmp::Ordering::Greater => {
+                    Self::Next(index - player.current).apply_sound_action(player)
+                }
+            },
+            Self::ToggleShuffle => player.toggle_shuffle(),
+            Self::CycleRepeat => player.repeat = player.repeat.next(),
+            Self::Download(videos) => {
+                for video in videos {
+                    let status = player
+                        .music_status
+                        .get(&video.video_id)
+                        .copied()
+                        .unwrap_or_else(|| downloaded_status(&video.video_id));
+                    if matches!(
+                        status,
+                        MusicDownloadStatus::Downloaded | MusicDownloadStatus::Downloading(_)
+                    ) || player
+                        .explicit_downloads
+                        .iter()
+                        .any(|x| x.video_id == video.video_id)
+                    {
+                        continue;
+                    }
+                    if status == MusicDownloadStatus::DownloadFailed {
+                        DOWNLOAD_MANAGER.remove_from_in_downloads(&video.video_id);
+                    }
+                    player
+                        .music_status
+                        .insert(video.video_id.clone(), MusicDownloadStatus::Queued);
+                    player.explicit_downloads.push(video);
                 }
             }
             Self::Previous(a) => {
@@ -107,28 +169,23 @@ impl SoundAction {
                 Self::insert(
                     player,
                     video.video_id.clone(),
-                    if DATABASE
-                        .read()
-                        .unwrap()
-                        .iter()
-                        .any(|e| e.video_id == video.video_id)
-                    {
-                        MusicDownloadStatus::Downloaded
-                    } else {
-                        MusicDownloadStatus::NotDownloaded
-                    },
+                    downloaded_status(&video.video_id),
                 );
+                if let Some(original) = player.original_order.as_mut() {
+                    original.push(video.clone());
+                }
                 if player.list.is_empty() {
                     player.list.push(video);
                 } else {
                     player.list.insert(player.current + 1, video);
                 }
             }
-            Self::DeleteVideoUnary => {
-                let index_list = player.list_selector.get_relative_position();
-                let video = player.relative_current(index_list).cloned().unwrap();
+            Self::RemoveIndex(index) => {
+                let Some(video) = player.list.get(index).cloned() else {
+                    return;
+                };
                 if matches!(
-                    player.music_status.get(&video.video_id), // not sure abt conditions, needs testing
+                    player.music_status.get(&video.video_id),
                     Some(
                         &MusicDownloadStatus::DownloadFailed
                             | &MusicDownloadStatus::Downloading(_)
@@ -137,16 +194,16 @@ impl SoundAction {
                 ) {
                     DOWNLOAD_MANAGER.remove_from_in_downloads(&video.video_id);
                 }
-                player.music_status.remove(&video.video_id); // maybe not necessary to do it
+                player.music_status.remove(&video.video_id);
 
-                //manage deleting in the list
-                player.list.retain(|vid| *vid != video);
-                player.list_selector.list_size -= 1;
-                if index_list < 0 {
-                    player.set_relative_current(-1);
+                player.list.remove(index);
+                if let Some(original) = player.original_order.as_mut() {
+                    original.retain(|vid| vid.video_id != video.video_id);
                 }
-                if index_list == 0 {
-                    Self::Next(0).apply_sound_action(player);
+                match index.cmp(&player.current) {
+                    std::cmp::Ordering::Less => player.set_relative_current(-1),
+                    std::cmp::Ordering::Equal => Self::Next(0).apply_sound_action(player),
+                    std::cmp::Ordering::Greater => {}
                 }
 
                 // manage deleting physically
@@ -164,15 +221,6 @@ impl SoundAction {
                     Ok(_) => trace!("Deleted MP4 file"),
                     Err(e) => error!("Error deleting MP4 video file: {}", e),
                 }
-            }
-            Self::ReplaceQueue(videos) => {
-                player.list.truncate(player.current + 1);
-                DOWNLOAD_MANAGER.clean(
-                    ShutdownSignal,
-                    download_manager_handler(player.soundaction_sender.clone()),
-                );
-                Self::AddVideosToQueue(videos).apply_sound_action(player);
-                Self::Next(1).apply_sound_action(player);
             }
         }
     }

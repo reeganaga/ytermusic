@@ -23,6 +23,20 @@ impl YTLocalDatabase {
         self.references.write().unwrap().clone_from(videos);
     }
 
+    /// Whether the video is downloaded, using the in-memory index (no disk access).
+    pub fn contains(&self, video_id: &str) -> bool {
+        self.references
+            .read()
+            .unwrap()
+            .iter()
+            .any(|x| x.video_id == video_id)
+    }
+
+    /// In-memory copy of every downloaded video.
+    pub fn all(&self) -> Vec<YoutubeMusicVideoRef> {
+        self.references.read().unwrap().clone()
+    }
+
     pub fn remove_video(&self, video: &YoutubeMusicVideoRef) {
         let mut database = self.references.write().unwrap();
         database.retain(|v| v.video_id != video.video_id);

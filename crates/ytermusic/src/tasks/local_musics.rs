@@ -7,7 +7,10 @@ use crate::{
     consts::{CACHE_DIR, CONFIG},
     run_service,
     structures::performance,
-    term::{ManagerMessage, Screens},
+    term::{
+        library::{PlaylistEntry, Source},
+        ManagerMessage,
+    },
     DATABASE,
 };
 
@@ -44,9 +47,10 @@ fn shuffle_and_send(mut videos: Vec<YoutubeMusicVideoRef>, updater_s: &Sender<Ma
     }
 
     updater_s
-        .send(
-            ManagerMessage::AddElementToChooser(("Local musics".to_owned(), videos))
-                .pass_to(Screens::Playlist),
-        )
+        .send(ManagerMessage::AddPlaylist(PlaylistEntry::new(
+            "Downloaded",
+            Source::Downloaded,
+            videos,
+        )))
         .unwrap();
 }

@@ -6940,6 +6940,7 @@ dependencies = [
  "tokio",
  "toml",
  "unicode-bidi",
+ "unicode-width",
  "urlencoding",
  "varuint",
  "winit",

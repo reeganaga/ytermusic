@@ -10,7 +10,10 @@ use crate::{
     consts::CONFIG,
     get_header_file, run_service,
     structures::performance,
-    term::{ManagerMessage, Screens},
+    term::{
+        library::{PlaylistEntry, Source},
+        ManagerMessage, Screens,
+    },
 };
 
 pub fn get_text_cookies_expired_or_invalid() -> String {
@@ -31,6 +34,17 @@ pub fn spawn_api_task(updater_s: Sender<ManagerMessage>) {
             Ok(api) => {
                 let api = Arc::new(api);
                 let mut set = JoinSet::new();
+                // "Liked Music" has its own sidebar entry
+                spawn_browse_playlist_task(
+                    YoutubeMusicPlaylistRef {
+                        name: "Liked Songs".to_owned(),
+                        subtitle: String::new(),
+                        browse_id: "VLLM".to_owned(),
+                    },
+                    Source::Liked,
+                    api.clone(),
+                    updater_s.clone(),
+                );
                 let api_ = api.clone();
                 let updater_s_ = updater_s.clone();
                 set.spawn(async move {
@@ -40,6 +54,7 @@ pub fn spawn_api_task(updater_s: Sender<ManagerMessage>) {
                             for playlist in e.playlists {
                                 spawn_browse_playlist_task(
                                     playlist.clone(),
+                                    Source::Home,
                                     api_.clone(),
                                     updater_s_.clone(),
                                 )
@@ -59,6 +74,7 @@ pub fn spawn_api_task(updater_s: Sender<ManagerMessage>) {
                             for playlist in e {
                                 spawn_browse_playlist_task(
                                     playlist.clone(),
+                                    Source::Library,
                                     api_.clone(),
                                     updater_s_.clone(),
                                 )
@@ -78,6 +94,7 @@ pub fn spawn_api_task(updater_s: Sender<ManagerMessage>) {
                             for playlist in e {
                                 spawn_browse_playlist_task(
                                     playlist.clone(),
+                                    Source::Library,
                                     api_.clone(),
                                     updater_s_.clone(),
                                 )
@@ -122,10 +139,11 @@ pub fn spawn_api_task(updater_s: Sender<ManagerMessage>) {
     });
 }
 
-static BROWSED_PLAYLISTS: Lazy<Mutex<Vec<(String, String)>>> = Lazy::new(|| Mutex::new(vec![]));
+static BROWSED_PLAYLISTS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(vec![]));
 
 fn spawn_browse_playlist_task(
     playlist: YoutubeMusicPlaylistRef,
+    source: Source,
     api: Arc<YoutubeMusicInstance>,
     updater_s: Sender<ManagerMessage>,
 ) {
@@ -146,13 +164,13 @@ fn spawn_browse_playlist_task(
         return;
     }
     {
+        // "LM" and "VLLM" are the same liked songs playlist
+        let id = playlist.browse_id.trim_start_matches("VL").to_owned();
         let mut k = BROWSED_PLAYLISTS.lock().unwrap();
-        if k.iter()
-            .any(|(name, id)| name == &playlist.name && id == &playlist.browse_id)
-        {
+        if k.contains(&id) {
             return;
         }
-        k.push((playlist.name.clone(), playlist.browse_id.clone()));
+        k.push(id);
     }
 
     run_service(async move {
@@ -160,17 +178,15 @@ fn spawn_browse_playlist_task(
         let guard = performance::guard(&guard);
         match api.get_playlist(&playlist, 5).await {
             Ok(videos) => {
-                if videos.len() < 2 {
+                if videos.len() < 2 && source != Source::Liked {
                     info!("Playlist {} is too small so skipped", playlist.name);
                     return;
                 }
-                let _ = updater_s.send(
-                    ManagerMessage::AddElementToChooser((
-                        format!("{} ({})", playlist.name, playlist.subtitle),
-                        videos,
-                    ))
-                    .pass_to(Screens::Playlist),
-                );
+                let _ = updater_s.send(ManagerMessage::AddPlaylist(PlaylistEntry::new(
+                    playlist.name,
+                    source,
+                    videos,
+                )));
             }
             Err(e) => {
                 error!("{e:?}");
