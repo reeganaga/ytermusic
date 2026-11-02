@@ -6,13 +6,13 @@ use std::{
 
 use json_extractor::{
     extract_playlist_info, from_json, get_continuation, get_playlist, get_playlist_search,
-    get_video, get_video_from_album, Continuation,
+    get_shelf_playlist_id, get_video, get_video_from_album, get_video_from_panel, Continuation,
 };
 use log::{debug, error, trace};
 pub use reqwest::header::HeaderMap;
 pub use reqwest::header::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use string_utils::StringUtils;
 
@@ -286,16 +286,7 @@ impl YoutubeMusicInstance {
         //     r#"{{"context":{{"client":{{"clientName":"WEB_REMIX","clientVersion":"{}"}}}}}}"#,
         //     self.client_version
         // );
-        let body = match &self.account_id {
-            Some(id) => format!(
-                r#"{{"context":{{"client":{{"clientName":"WEB_REMIX","clientVersion":"{}"}},"user":{{"onBehalfOfUser":"{id}"}}}}}}"#,
-                self.client_version
-            ),
-            None => format!(
-                r#"{{"context":{{"client":{{"clientName":"WEB_REMIX","clientVersion":"{}"}}}}}}"#,
-                self.client_version
-            ),
-        };
+        let body = self.context_body().to_string();
         self.client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -313,27 +304,26 @@ impl YoutubeMusicInstance {
             .await
             .map_err(YoutubeMusicError::RequestError)
     }
-    async fn browse_raw(
-        &self,
-        endpoint_route: &str,
-        endpoint_key: &str,
-        endpoint_param: &str,
-    ) -> Result<String> {
+    fn context_body(&self) -> Value {
+        let mut context = json!({
+            "client": {"clientName": "WEB_REMIX", "clientVersion": self.client_version}
+        });
+        if let Some(id) = &self.account_id {
+            context["user"] = json!({ "onBehalfOfUser": id });
+        }
+        json!({ "context": context })
+    }
+    async fn browse_raw(&self, endpoint: &Endpoint) -> Result<String> {
+        let endpoint_route = endpoint.get_route();
         trace!("Browse {endpoint_route}");
         let url = format!(
             "https://music.youtube.com/youtubei/v1/{endpoint_route}?key={}&prettyPrint=false",
             self.innertube_api_key
         );
-        let body = match &self.account_id {
-            Some(id) => format!(
-                r#"{{"context":{{"client":{{"clientName":"WEB_REMIX","clientVersion":"{}"}},"user":{{"onBehalfOfUser":"{id}"}}}},"{endpoint_key}":"{endpoint_param}"}}"#,
-                self.client_version
-            ),
-            None => format!(
-                r#"{{"context":{{"client":{{"clientName":"WEB_REMIX","clientVersion":"{}"}}}},"{endpoint_key}":"{endpoint_param}"}}"#,
-                self.client_version
-            ),
-        };
+        let mut body = self.context_body();
+        for (key, value) in endpoint.get_fields() {
+            body[key] = Value::String(value);
+        }
         self.client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -343,7 +333,7 @@ impl YoutubeMusicInstance {
             )
             .header("X-Origin", "https://music.youtube.com")
             .header("Cookie", &self.cookies)
-            .body(body)
+            .body(body.to_string())
             .send()
             .await
             .map_err(YoutubeMusicError::RequestError)?
@@ -356,16 +346,8 @@ impl YoutubeMusicInstance {
         endpoint: &Endpoint,
         continuations: bool,
     ) -> Result<(serde_json::Value, Vec<Continuation>)> {
-        let playlist_json: Value = serde_json::from_str(
-            &self
-                .browse_raw(
-                    &endpoint.get_route(),
-                    &endpoint.get_key(),
-                    &endpoint.get_param(),
-                )
-                .await?,
-        )
-        .map_err(YoutubeMusicError::SerdeJson)?;
+        let playlist_json: Value = serde_json::from_str(&self.browse_raw(endpoint).await?)
+            .map_err(YoutubeMusicError::SerdeJson)?;
         debug!("Browse response: {playlist_json}");
         if playlist_json.get("error").is_some() {
             error!("Error in browse ({endpoint:?})");
@@ -457,10 +439,19 @@ impl YoutubeMusicInstance {
     pub async fn search(
         &self,
         search_query: &str,
+        n_continuations: usize,
+    ) -> Result<SearchResults> {
+        self.search_filtered(search_query, SearchFilter::All, n_continuations)
+            .await
+    }
+    pub async fn search_filtered(
+        &self,
+        search_query: &str,
+        filter: SearchFilter,
         mut n_continuations: usize,
     ) -> Result<SearchResults> {
         let (search_json, mut continuations) = self
-            .browse(&Endpoint::Search(search_query.to_string()), false)
+            .browse(&Endpoint::Search(search_query.to_string(), filter), false)
             .await?;
         debug!("Search response: {search_json}");
         let mut videos = from_json(&search_json, get_video)?;
@@ -487,6 +478,36 @@ impl YoutubeMusicInstance {
         }
 
         Ok(SearchResults { videos, playlists })
+    }
+
+    /// Songs of a radio ("mix") seeded from the given video.
+    pub async fn get_radio(&self, video_id: &str) -> Result<Vec<YoutubeMusicVideoRef>> {
+        let (json, _) = self
+            .browse(&Endpoint::Radio(video_id.to_string()), false)
+            .await?;
+        from_json(&json, get_video_from_panel)
+    }
+
+    /// Songs behind any browse id: playlists, albums, or an artist's full song list.
+    pub async fn get_browse_songs(
+        &self,
+        browse_id: &str,
+        n_continuations: usize,
+    ) -> Result<Vec<YoutubeMusicVideoRef>> {
+        if BrowseKind::of(browse_id) != BrowseKind::Artist {
+            return self.get_playlist_raw(browse_id, n_continuations).await;
+        }
+        let (artist_json, _) = self
+            .browse(&Endpoint::Playlist(browse_id.to_string()), false)
+            .await?;
+        // The "Top songs" shelf links to a playlist with every song of the artist.
+        if let Some(all_songs) = from_json(&artist_json, get_shelf_playlist_id)?.first() {
+            let songs = self.get_playlist_raw(all_songs, n_continuations).await?;
+            if !songs.is_empty() {
+                return Ok(songs);
+            }
+        }
+        from_json(&artist_json, get_video)
     }
 
     pub async fn get_home(&self, mut n_continuations: usize) -> Result<SearchResults> {
@@ -547,41 +568,109 @@ pub struct SearchResults {
     pub playlists: Vec<YoutubeMusicPlaylistRef>,
 }
 
+/// Search result category, mapped to the YouTube Music search filter chips.
+#[derive(Debug, Clone, Copy, PartialOrd, Eq, Ord, PartialEq, Hash, Default)]
+pub enum SearchFilter {
+    #[default]
+    All,
+    Songs,
+    Artists,
+    Albums,
+    FeaturedPlaylists,
+    CommunityPlaylists,
+}
+
+impl SearchFilter {
+    pub const ALL: [SearchFilter; 6] = [
+        SearchFilter::All,
+        SearchFilter::Songs,
+        SearchFilter::Artists,
+        SearchFilter::Albums,
+        SearchFilter::FeaturedPlaylists,
+        SearchFilter::CommunityPlaylists,
+    ];
+    pub fn label(&self) -> &'static str {
+        match self {
+            SearchFilter::All => "All",
+            SearchFilter::Songs => "Songs",
+            SearchFilter::Artists => "Artists",
+            SearchFilter::Albums => "Albums",
+            SearchFilter::FeaturedPlaylists => "Featured Playlists",
+            SearchFilter::CommunityPlaylists => "Community Playlists",
+        }
+    }
+    fn params(&self) -> Option<&'static str> {
+        match self {
+            SearchFilter::All => None,
+            SearchFilter::Songs => Some("EgWKAQIIAWoSEAUQCRADEBAQBBAKEA4QFRAR"),
+            SearchFilter::Artists => Some("EgWKAQIgAWoSEAUQCRADEBAQBBAKEA4QFRAR"),
+            SearchFilter::Albums => Some("EgWKAQIYAWoSEAUQCRADEBAQBBAKEA4QFRAR"),
+            SearchFilter::FeaturedPlaylists => Some("EgeKAQQoADgBahIQBRAJEAMQEBAEEAoQDhAVEBE="),
+            SearchFilter::CommunityPlaylists => Some("EgeKAQQoAEABahIQBRAJEAMQEBAEEAoQDhAVEBE="),
+        }
+    }
+}
+
+/// What a browse id points to, derived from its prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowseKind {
+    Artist,
+    Album,
+    Playlist,
+}
+
+impl BrowseKind {
+    pub fn of(browse_id: &str) -> Self {
+        if browse_id.starts_with("UC") {
+            BrowseKind::Artist
+        } else if browse_id.starts_with("MPRE") {
+            BrowseKind::Album
+        } else {
+            BrowseKind::Playlist
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialOrd, Eq, Ord, PartialEq, Hash)]
 pub enum Endpoint {
     MusicLikedPlaylists,
     MusicHome,
     MusicLibraryLanding,
     Playlist(String),
-    Search(String),
+    Search(String, SearchFilter),
+    /// Radio ("mix") seeded from a video id.
+    Radio(String),
 }
 
 impl Endpoint {
-    fn get_key(&self) -> String {
+    fn get_fields(&self) -> Vec<(&'static str, String)> {
         match self {
-            Endpoint::MusicLikedPlaylists => "browseId".to_owned(),
-            Endpoint::MusicLibraryLanding => "browseId".to_owned(),
-            Endpoint::Playlist(_) => "browseId".to_owned(),
-            Endpoint::MusicHome => "browseId".to_owned(),
-            Endpoint::Search(_) => "query".to_owned(),
+            Endpoint::MusicLikedPlaylists => {
+                vec![("browseId", "FEmusic_liked_playlists".to_owned())]
+            }
+            Endpoint::MusicLibraryLanding => {
+                vec![("browseId", "FEmusic_library_landing".to_owned())]
+            }
+            Endpoint::Playlist(id) => vec![("browseId", id.to_owned())],
+            Endpoint::MusicHome => vec![("browseId", "FEmusic_home".to_owned())],
+            Endpoint::Search(query, filter) => {
+                let mut fields = vec![("query", query.to_owned())];
+                if let Some(params) = filter.params() {
+                    fields.push(("params", params.to_owned()));
+                }
+                fields
+            }
+            Endpoint::Radio(video_id) => vec![
+                ("videoId", video_id.to_owned()),
+                ("playlistId", format!("RDAMVM{video_id}")),
+            ],
         }
     }
-    fn get_param(&self) -> String {
+    fn get_route(&self) -> &'static str {
         match self {
-            Endpoint::MusicLikedPlaylists => "FEmusic_liked_playlists".to_owned(),
-            Endpoint::MusicLibraryLanding => "FEmusic_library_landing".to_owned(),
-            Endpoint::Playlist(id) => id.to_owned(),
-            Endpoint::Search(query) => query.to_owned(),
-            Endpoint::MusicHome => "FEmusic_home".to_owned(),
-        }
-    }
-    fn get_route(&self) -> String {
-        match self {
-            Endpoint::MusicLikedPlaylists => "browse".to_owned(),
-            Endpoint::MusicLibraryLanding => "browse".to_owned(),
-            Endpoint::Playlist(_) => "browse".to_owned(),
-            Endpoint::Search(_) => "search".to_owned(),
-            Endpoint::MusicHome => "browse".to_owned(),
+            Endpoint::Search(..) => "search",
+            Endpoint::Radio(_) => "next",
+            _ => "browse",
         }
     }
 }
