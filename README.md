@@ -85,22 +85,51 @@ YTerMusic is a TUI based Youtube Music Player that aims to be as fast and simple
 
 ## Usage
 
-- Use your mouse to <kbd>click</kbd> in lists if your terminal has mouse support
-- Press <kbd>Space</kbd> to play/pause
-- Press <kbd>Enter</kbd> to select a playlist or a music
-- Press <kbd>f</kbd> to search
-- Press <kbd>s</kbd> to shuffle
-- Press <kbd>r</kbd> to remove a music from the main playlist
-- Press <kbd>Arrow Right</kbd> or <kbd>\></kbd> to skip 5 seconds
-- Press <kbd>Arrow Left</kbd> or <kbd>\<</kbd> to go back 5 seconds
-- Press <kbd>CTRL</kbd> + <kbd>Arrow Right</kbd> or <kbd>CTRL</kbd> + <kbd>\></kbd> to go to the next song
-- Press <kbd>CTRL</kbd> + <kbd>Arrow Left</kbd> or <kbd>CTRL</kbd> + <kbd>\<</kbd> to go to the previous song
-- Press <kbd>+</kbd> for volume up
-- Press <kbd>-</kbd> for volume down
-- Press <kbd>Arrow down</kbd> to scroll down
-- Press <kbd>Arrow up</kbd> to scroll up
-- Press <kbd>ESC</kbd> to exit the current menu
-- Press <kbd>CTRL</kbd> + <kbd>C</kbd> or <kbd>CTRL</kbd> + <kbd>D</kbd> to exit
+The screen has a tab bar (`[1] Player`, `[2] Library`, `[3] Search`), a sidebar
+(Home, Search, Liked Songs, your playlists, Downloaded), the main panel and a
+player bar at the bottom. The bottom line always lists the keys available on the
+current screen.
+
+Global keys:
+
+- <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> to switch tab, <kbd>/</kbd> (or <kbd>f</kbd>) to search
+- <kbd>Tab</kbd> to move the focus between the sidebar and the main panel
+- <kbd>s</kbd> to hide / show the sidebar
+- <kbd>Space</kbd> to play/pause
+- <kbd>x</kbd> to toggle shuffle, <kbd>r</kbd> to cycle repeat (off / all / one)
+- <kbd>Arrow Right</kbd> / <kbd>\></kbd> and <kbd>Arrow Left</kbd> / <kbd>\<</kbd> to seek 5 seconds
+- <kbd>CTRL</kbd> + <kbd>Arrow Right</kbd> / <kbd>Arrow Left</kbd> for the next / previous song
+- <kbd>+</kbd> / <kbd>-</kbd> for the volume
+- <kbd>Backspace</kbd> or <kbd>ESC</kbd> to go back
+- <kbd>q</kbd>, <kbd>CTRL</kbd> + <kbd>C</kbd> or <kbd>CTRL</kbd> + <kbd>D</kbd> to exit
+
+Player (queue): <kbd>Enter</kbd> plays the selected song, <kbd>Delete</kbd> removes it
+(and its download), <kbd>C</kbd> clears the queue.
+
+Library: arrows to move between playlists, <kbd>Enter</kbd> to open one.
+
+Playlist viewer: <kbd>Enter</kbd> plays from the selected song, <kbd>p</kbd> plays
+everything, <kbd>d</kbd> / <kbd>D</kbd> download the song / the whole playlist.
+
+Search: type your query, <kbd>Arrow Left</kbd> / <kbd>Arrow Right</kbd> change the category
+(All, Songs, Artists, Albums, Featured / Community playlists), <kbd>Enter</kbd> or
+<kbd>Arrow Down</kbd> moves to the results. In the results, <kbd>Enter</kbd> adds a song to
+the queue (or opens an artist, album or playlist) and <kbd>m</kbd> starts a mix from the
+song. <kbd>ESC</kbd> clears the query.
+
+The mouse works too: tabs, sidebar, rows (click a selected row to play it), the
+transport buttons, the progress bar (seek) and the volume.
+
+### Appearance
+
+Colors are set in the `[theme]` section of `config.toml` (`#rrggbb` values):
+`bg`, `border`, `accent`, `on_accent`, `text`, `text_dim`, `highlight`, `error`.
+
+To show the album art of the playing song, build with
+`cargo build --release --features thumbnails` and set `album_art = "thumbnail"` in the
+`[player]` section. It needs a terminal supporting the kitty, sixel or iTerm2 image
+protocol; otherwise the placeholder is kept. `shuffle = true` and
+`repeat = "all" | "one"` set the modes at startup.
 
 ## How to fix common issues
 
