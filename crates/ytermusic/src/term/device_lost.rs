@@ -48,7 +48,7 @@ impl Screen for DeviceLost {
                     .title(" Error ")
                     .border_type(BorderType::Plain),
             ),
-            frame.size(),
+            frame.area(),
         );
     }
 

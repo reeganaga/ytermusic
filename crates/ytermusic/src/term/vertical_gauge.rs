@@ -44,7 +44,7 @@ impl<'a> Widget for VerticalGauge<'a> {
         for y in gauge_area.top()..end {
             // render the filled area (left to end)
             for x in gauge_area.left()..gauge_area.right() {
-                buf.get_mut(x, y)
+                buf[(x, y)]
                     .set_symbol(" ")
                     .set_bg(self.gauge_style.bg.unwrap_or(Color::Reset))
                     .set_fg(self.gauge_style.fg.unwrap_or(Color::Reset));
@@ -53,7 +53,7 @@ impl<'a> Widget for VerticalGauge<'a> {
         for y in end..gauge_area.bottom() {
             // render the empty area (end to right)
             for x in gauge_area.left()..gauge_area.right() {
-                buf.get_mut(x, y)
+                buf[(x, y)]
                     .set_symbol(" ")
                     .set_bg(self.gauge_style.fg.unwrap_or(Color::Reset))
                     .set_fg(self.gauge_style.bg.unwrap_or(Color::Reset));
@@ -61,12 +61,12 @@ impl<'a> Widget for VerticalGauge<'a> {
         }
         for x in label_col..label_col + clamped_label_width {
             if gauge_area.height / 2 > end.saturating_sub(2) {
-                buf.get_mut(x, label_row)
+                buf[(x, label_row)]
                     .set_symbol(&label[(x - label_col) as usize..(x - label_col + 1) as usize])
                     .set_bg(self.gauge_style.fg.unwrap_or(Color::Reset))
                     .set_fg(self.gauge_style.bg.unwrap_or(Color::Reset));
             } else {
-                buf.get_mut(x, label_row)
+                buf[(x, label_row)]
                     .set_symbol(&label[(x - label_col) as usize..(x - label_col + 1) as usize])
                     .set_bg(self.gauge_style.bg.unwrap_or(Color::Reset))
                     .set_fg(self.gauge_style.fg.unwrap_or(Color::Reset));

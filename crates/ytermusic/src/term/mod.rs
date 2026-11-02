@@ -211,7 +211,7 @@ impl Manager {
                     break 'a;
                 }
             }
-            let rectsize = terminal.size()?;
+            let rectsize = Rect::from((ratatui::layout::Position::ORIGIN, terminal.size()?));
             terminal.draw(|f| {
                 self.music_player.update();
                 self.current_screen().render(f);

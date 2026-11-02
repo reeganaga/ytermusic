@@ -118,7 +118,7 @@ impl Screen for Chooser {
     }
 
     fn render(&mut self, frame: &mut Frame) {
-        frame.render_widget(&self.item_list, frame.size());
+        frame.render_widget(&self.item_list, frame.area());
     }
 
     fn handle_global_message(&mut self, message: super::ManagerMessage) -> EventResponse {

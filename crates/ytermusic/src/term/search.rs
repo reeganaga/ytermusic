@@ -192,7 +192,7 @@ impl Screen for Search {
     }
 
     fn render(&mut self, frame: &mut Frame) {
-        let splitted = split_y_start(frame.size(), 3);
+        let splitted = split_y_start(frame.area(), 3);
         frame.render_widget(
             Paragraph::new(self.text.clone())
                 .style(CONFIG.player.text_searching_style)

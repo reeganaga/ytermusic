@@ -174,7 +174,7 @@ impl Screen for PlayerState {
 
     fn render(&mut self, f: &mut ratatui::Frame) {
         let render_volume_slider = CONFIG.player.volume_slider;
-        let [top_rect, progress_rect] = split_y(f.size(), 3);
+        let [top_rect, progress_rect] = split_y(f.area(), 3);
         let [list_rect, volume_rect] = split_x(top_rect, if render_volume_slider { 10 } else { 0 });
         let colors = if self.sink.is_paused() {
             AppStatus::Paused
