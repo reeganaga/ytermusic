@@ -457,7 +457,11 @@ impl Manager {
             s.render(buf, main, ctx);
             s.hints(ctx)
         });
-        chrome::player_bar(buf, &mut layout, &self.player);
+        #[cfg(feature = "thumbnails")]
+        let art_width = if self.thumbnail.active() { 6 } else { 5 };
+        #[cfg(not(feature = "thumbnails"))]
+        let art_width = 5;
+        chrome::player_bar(buf, &mut layout, &self.player, art_width);
         #[cfg(feature = "thumbnails")]
         self.thumbnail.render(frame, &layout, &self.player);
         chrome::status_line(frame.buffer_mut(), &layout, &hints, notice.as_deref());
@@ -472,6 +476,8 @@ impl Manager {
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
+        #[cfg(feature = "thumbnails")]
+        self.thumbnail.init();
 
         // create app and run it
         let tick_rate = Duration::from_millis(250);

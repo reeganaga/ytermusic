@@ -201,7 +201,12 @@ pub fn art_placeholder(buf: &mut Buffer, area: Rect) {
     );
 }
 
-pub fn player_bar(buf: &mut Buffer, layout: &mut FrameLayout, player: &PlayerState) {
+pub fn player_bar(
+    buf: &mut Buffer,
+    layout: &mut FrameLayout,
+    player: &PlayerState,
+    art_width: u16,
+) {
     let full = layout.player_bar;
     if full.height < 2 {
         return;
@@ -220,7 +225,10 @@ pub fn player_bar(buf: &mut Buffer, layout: &mut FrameLayout, player: &PlayerSta
     let middle = area.y + area.height / 2;
 
     // Art
-    let art = Rect { width: 5, ..area };
+    let art = Rect {
+        width: art_width,
+        ..area
+    };
     layout.art = art;
     art_placeholder(buf, art);
 

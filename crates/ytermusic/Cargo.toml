@@ -29,6 +29,11 @@ ratatui = { version = "0.30.2", features = ["serde"] }
 unicode-bidi = "0.3"
 unicode-width = "0.2"
 
+#  --- Thumbnails (optional) ---
+ratatui-image = { version = "11", optional = true, default-features = false, features = ["crossterm"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg"] }
+reqwest = { version = "0.11.24", optional = true, default-features = false, features = ["rustls-tls"] }
+
 #  --- Player ---
 player.workspace = true
 
@@ -57,7 +62,7 @@ ctrlc = "3.5.0"
 [features]
 rusty-ytdl-backend = ["download-manager/rusty-ytdl-backend"]
 # Show the album art of the playing song (kitty / sixel / iTerm2 terminals)
-thumbnails = []
+thumbnails = ["dep:ratatui-image", "dep:image", "dep:reqwest"]
 
 [target."cfg(target_os = \"windows\")".dependencies]
 raw-window-handle = "0.4.3"
