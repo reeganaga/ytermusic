@@ -488,6 +488,19 @@ impl YoutubeMusicInstance {
         from_json(&json, get_video_from_panel)
     }
 
+    /// Plain (unsynced) lyrics of a song, as shown in the "Lyrics" tab.
+    /// `Ok(None)` when YouTube Music has no lyrics for it.
+    pub async fn get_lyrics(&self, video_id: &str) -> Result<Option<String>> {
+        let (next_json, _) = self
+            .browse(&Endpoint::Next(video_id.to_string()), false)
+            .await?;
+        let Some(browse_id) = find_lyrics_browse_id(&next_json) else {
+            return Ok(None);
+        };
+        let (lyrics_json, _) = self.browse(&Endpoint::Playlist(browse_id), false).await?;
+        Ok(find_lyrics_text(&lyrics_json))
+    }
+
     /// Songs behind any browse id: playlists, albums, or an artist's full song list.
     pub async fn get_browse_songs(
         &self,
@@ -640,6 +653,8 @@ pub enum Endpoint {
     Search(String, SearchFilter),
     /// Radio ("mix") seeded from a video id.
     Radio(String),
+    /// Watch page data ("next") of a video: tabs for up next, lyrics, related.
+    Next(String),
 }
 
 impl Endpoint {
@@ -664,15 +679,71 @@ impl Endpoint {
                 ("videoId", video_id.to_owned()),
                 ("playlistId", format!("RDAMVM{video_id}")),
             ],
+            Endpoint::Next(video_id) => vec![("videoId", video_id.to_owned())],
         }
     }
     fn get_route(&self) -> &'static str {
         match self {
             Endpoint::Search(..) => "search",
-            Endpoint::Radio(_) => "next",
+            Endpoint::Radio(_) | Endpoint::Next(_) => "next",
             _ => "browse",
         }
     }
+}
+
+/// Browse id of the lyrics tab (`MPLY...`) in a "next" response.
+fn find_lyrics_browse_id(json: &Value) -> Option<String> {
+    match json {
+        Value::Object(map) => {
+            if let Some(Value::String(id)) = map.get("browseId") {
+                if id.starts_with("MPLY") {
+                    return Some(id.clone());
+                }
+            }
+            map.values().find_map(find_lyrics_browse_id)
+        }
+        Value::Array(values) => values.iter().find_map(find_lyrics_browse_id),
+        _ => None,
+    }
+}
+
+/// Text of the `musicDescriptionShelfRenderer` in a lyrics browse response.
+fn find_lyrics_text(json: &Value) -> Option<String> {
+    match json {
+        Value::Object(map) => {
+            if let Some(shelf) = map.get("musicDescriptionShelfRenderer") {
+                let text: String = shelf
+                    .pointer("/description/runs")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|run| run.get("text")?.as_str())
+                    .collect();
+                return (!text.trim().is_empty()).then_some(text);
+            }
+            map.values().find_map(find_lyrics_text)
+        }
+        Value::Array(values) => values.iter().find_map(find_lyrics_text),
+        _ => None,
+    }
+}
+
+#[test]
+fn lyrics_json_extraction() {
+    let next = json!({"tabs": [
+        {"tabRenderer": {"endpoint": {"browseEndpoint": {"browseId": "FEmusic_up_next"}}}},
+        {"tabRenderer": {"endpoint": {"browseEndpoint": {"browseId": "MPLYt_abc"}}}}
+    ]});
+    assert_eq!(find_lyrics_browse_id(&next).as_deref(), Some("MPLYt_abc"));
+    let lyrics = json!({"contents": {"sectionListRenderer": {"contents": [
+        {"musicDescriptionShelfRenderer": {"description": {"runs": [
+            {"text": "line one\n"}, {"text": "line two"}
+        ]}}}
+    ]}}});
+    assert_eq!(
+        find_lyrics_text(&lyrics).as_deref(),
+        Some("line one\nline two")
+    );
+    assert_eq!(find_lyrics_text(&json!({})), None);
 }
 
 #[derive(Debug)]
