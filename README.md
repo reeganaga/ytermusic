@@ -34,6 +34,7 @@ YTerMusic is a TUI based Youtube Music Player that aims to be as fast and simple
 	- [x] A download limit to stop downloading after the queue is full
 	- [x] Mouse support
 	- [x] Search
+	- [x] Synced lyrics with translation and romanization
 	- [x] Custom theming (You can use hex! #05313d = ![05313d](./assets/hex/05313d.png "#05313d") )
 
 ## Install
@@ -95,6 +96,7 @@ Global keys:
 - <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> to switch tab, <kbd>/</kbd> (or <kbd>f</kbd>) to search
 - <kbd>Tab</kbd> to move the focus between the sidebar and the main panel
 - <kbd>s</kbd> to hide / show the sidebar
+- <kbd>y</kbd> to switch the player screen between the queue and the lyrics
 - <kbd>Space</kbd> to play/pause
 - <kbd>x</kbd> to toggle shuffle, <kbd>r</kbd> to cycle repeat (off / all / one)
 - <kbd>Arrow Right</kbd> / <kbd>\></kbd> and <kbd>Arrow Left</kbd> / <kbd>\<</kbd> to seek 5 seconds
@@ -105,6 +107,15 @@ Global keys:
 
 Player (queue): <kbd>Enter</kbd> plays the selected song, <kbd>Delete</kbd> removes it
 (and its download), <kbd>C</kbd> clears the queue.
+
+Lyrics (<kbd>y</kbd>): synced lyrics scroll with the song and the current line is
+highlighted. <kbd>j</kbd> / <kbd>k</kbd> scroll by hand (auto-scroll resumes after 5
+seconds), <kbd>c</kbd> jumps back to the current line, <kbd>R</kbd> / <kbd>T</kbd> show or
+hide the romanization (romaji, pinyin, romaja...) and the translation under each line, and
+<kbd>[</kbd> / <kbd>]</kbd> shift the timing by 0.5 seconds when the lyrics are early or
+late. Lyrics come from [LRCLIB](https://lrclib.net) (synced), with the YouTube Music lyrics as
+a fallback (unsynced, shown with "unsynced" in the panel title). They are only fetched while
+the panel is open and are cached in the cache folder.
 
 Library: arrows to move between playlists, <kbd>Enter</kbd> to open one.
 
@@ -130,6 +141,21 @@ To show the album art of the playing song, build with
 `[player]` section. It needs a terminal supporting the kitty, sixel or iTerm2 image
 protocol; otherwise the placeholder is kept. `shuffle = true` and
 `repeat = "all" | "one"` set the modes at startup.
+
+### Lyrics
+
+The `[lyrics]` section of `config.toml`:
+
+```toml
+[lyrics]
+romanize = true      # show romanization under non-latin lyrics (R toggles and saves it)
+translate = true     # show the translation under each line (T toggles and saves it)
+translate_to = "en"  # language of the translation: "en", "id", "fr", "es"...
+```
+
+Translation and romanization use Google Translate's public web endpoint (the one used by
+browser extensions). It needs no API key, but it is unofficial: it may be rate limited or
+stop working, in which case the panel shows "translate failed" and keeps the original lyrics.
 
 ## How to fix common issues
 
