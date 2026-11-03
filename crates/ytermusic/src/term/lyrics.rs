@@ -156,7 +156,9 @@ impl LyricsView {
             };
         }
         if let (State::Loaded(lyrics), Some(id)) = (&self.state, &self.video_id) {
-            let wanted = self.romanize || self.translate;
+            // Google is only asked for what the source does not give
+            let wanted = (self.romanize && !lyrics.has_builtin_romanization())
+                || (self.translate && lyrics.builtin_translation(Self::target()).is_none());
             if wanted
                 && !self.translating
                 && !self.translate_failed
@@ -296,13 +298,27 @@ impl LyricsView {
 
     /// Wrapped rows of every lyric line with its romanization and translation.
     fn build_layout(&self, lyrics: &Lyrics, width: usize) -> Layout {
-        let translation = lyrics.translations.get(Self::target());
-        let romanized = translation.map(|t| &t.romanized).filter(|_| self.romanize);
-        let translated = translation
-            .map(|t| &t.translated)
+        // The source's own romanization / translation first, Google's otherwise
+        let google = lyrics.translations.get(Self::target());
+        let builtin_romanization = lyrics.has_builtin_romanization();
+        let romanized = google
+            .map(|t| &t.romanized)
+            .filter(|_| self.romanize && !builtin_romanization);
+        let translated = lyrics
+            .builtin_translation(Self::target())
+            .or(google.map(|t| &t.translated))
             .filter(|_| self.translate);
+        let romanization = |i: usize| -> Option<(&str, &[Word])> {
+            if !self.romanize {
+                return None;
+            }
+            match &lyrics.lines[i].romanized {
+                Some(x) => Some((&x.text, &x.words)),
+                None => extra(romanized, i).map(|x| (x, &[][..])),
+            }
+        };
         let spaced = (0..lyrics.lines.len())
-            .any(|i| extra(romanized, i).is_some() || extra(translated, i).is_some());
+            .any(|i| romanization(i).is_some() || extra(translated, i).is_some());
 
         let mut layout = Layout {
             width,
@@ -332,8 +348,9 @@ impl LyricsView {
             };
             layout.align = line.align;
             layout.push_wrapped(&original, RowKind::Main, i, words);
-            if let Some(romanized) = extra(romanized, i) {
-                layout.push_wrapped(romanized, RowKind::Romanized, i, &[]);
+            if let Some((text, words)) = romanization(i) {
+                let words = if self.word_sync { words } else { &[] };
+                layout.push_wrapped(text, RowKind::Romanized, i, words);
             }
             if let Some(translated) = extra(translated, i) {
                 layout.push_wrapped(translated, RowKind::Translated, i, &[]);
@@ -389,9 +406,15 @@ impl LyricsView {
         if !self.word_sync || ctx.player.sink.is_paused() || !synced_words(lyrics) {
             return None;
         }
-        let words = active.and_then(|a| lyrics.lines.get(a)).map(|x| &x.words);
-        let next_word = words
+        let line = active.and_then(|a| lyrics.lines.get(a));
+        let romanized = line
+            .and_then(|x| x.romanized.as_ref())
+            .filter(|_| self.romanize)
+            .map(|x| &x.words);
+        let next_word = line
+            .map(|x| &x.words)
             .into_iter()
+            .chain(romanized)
             .flatten()
             .map(|x| x.start_ms)
             .filter(|&start| start > position)
