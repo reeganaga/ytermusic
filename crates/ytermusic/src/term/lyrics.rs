@@ -13,7 +13,7 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use flume::{Receiver, Sender};
 use log::{error, info};
-use lyrics::{lrc, Cache, HttpClient, Lyrics, Source, Track, Translation};
+use lyrics::{lrc, Cache, Fetched, HttpClient, Lyrics, Source, Track, Translation};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -195,35 +195,27 @@ impl LyricsView {
         let video = video.clone();
         run_service(async move {
             let id = video.video_id.clone();
-            if let Some(lyrics) = cache.load(&id) {
-                let _ = sender.send(Update::Lyrics(id, Some(lyrics)));
-                return;
-            }
             let track = Track {
                 title: &video.title,
                 artist: &video.author,
                 album: &video.album,
                 duration_secs: parse_duration(&video.duration),
             };
-            let mut found = lyrics::lrclib::fetch(&client, &track)
-                .await
-                .inspect_err(|e| error!("LRCLIB: {e}"))
-                .ok()
-                .flatten();
-            if found.is_none() {
-                if let Some(api) = api {
-                    info!("No LRCLIB lyrics for {id}, trying YouTube Music");
-                    found = api
-                        .get_lyrics(&id)
-                        .await
-                        .inspect_err(|e| error!("YouTube Music lyrics: {e:?}"))
-                        .ok()
-                        .flatten()
-                        .map(|text| Lyrics::from_plain(Source::YoutubeMusic, &text));
+            let mut found = None;
+            for &source in CHAIN {
+                if let Some(lyrics) = cache.load(&id, source) {
+                    found = Some(lyrics);
+                    break;
                 }
-            }
-            if let Some(lyrics) = &found {
-                cache.save(&id, lyrics);
+                match fetch_from(source, &client, &track, &id, api.as_deref()).await {
+                    Fetched::Found(lyrics) => {
+                        cache.save(&id, &lyrics);
+                        found = Some(lyrics);
+                        break;
+                    }
+                    Fetched::Missing => info!("No {} lyrics for {id}", source.label()),
+                    Fetched::Failed(e) => error!("{} lyrics: {e}", source.label()),
+                }
             }
             let _ = sender.send(Update::Lyrics(id, found));
         });
@@ -390,6 +382,30 @@ impl LyricsView {
                 self.scroll = from + (to as f32 - from) * ease_out_cubic(t);
             }
         }
+    }
+}
+
+/// Sources asked in order until one has the song's lyrics.
+const CHAIN: &[Source] = &[Source::Lrclib, Source::YoutubeMusic];
+
+async fn fetch_from(
+    source: Source,
+    client: &HttpClient,
+    track: &Track<'_>,
+    video_id: &str,
+    api: Option<&YoutubeMusicInstance>,
+) -> Fetched {
+    match source {
+        Source::Lrclib => lyrics::lrclib::fetch(client, track).await.into(),
+        Source::YoutubeMusic => match api {
+            Some(api) => api
+                .get_lyrics(video_id)
+                .await
+                .map(|text| text.map(|text| Lyrics::from_plain(Source::YoutubeMusic, &text)))
+                .map_err(|e| format!("{e:?}"))
+                .into(),
+            None => Fetched::Missing,
+        },
     }
 }
 

@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use log::warn;
@@ -26,6 +26,44 @@ pub use translate::Translation;
 pub enum Source {
     Lrclib,
     YoutubeMusic,
+}
+
+impl Source {
+    /// Name used in cache file names.
+    pub fn key(self) -> &'static str {
+        match self {
+            Source::Lrclib => "lrclib",
+            Source::YoutubeMusic => "youtube",
+        }
+    }
+
+    /// Name shown to the user.
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Lrclib => "LRCLIB",
+            Source::YoutubeMusic => "YouTube Music",
+        }
+    }
+}
+
+/// Answer of one lyrics source.
+#[derive(Debug)]
+pub enum Fetched {
+    Found(Lyrics),
+    /// The source has no lyrics for this song
+    Missing,
+    /// Temporary failure (network, rate limit...): worth asking again later
+    Failed(String),
+}
+
+impl From<Result<Option<Lyrics>, String>> for Fetched {
+    fn from(result: Result<Option<Lyrics>, String>) -> Self {
+        match result {
+            Ok(Some(lyrics)) => Fetched::Found(lyrics),
+            Ok(None) => Fetched::Missing,
+            Err(e) => Fetched::Failed(e),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,7 +142,12 @@ pub fn http_client() -> HttpClient {
         .unwrap_or_default()
 }
 
-/// Lyrics files, one JSON per video id.
+/// A "not found" answer is trusted this long, then the source is asked again
+/// (its database grows over time).
+pub const MISS_TTL: Duration = Duration::from_secs(3 * 24 * 3600);
+
+/// Lyrics files, one JSON per video id and source (`{id}.{source}.json`),
+/// plus `{id}.{source}.miss` markers for sources that had nothing.
 #[derive(Debug, Clone)]
 pub struct Cache {
     dir: PathBuf,
@@ -115,26 +158,47 @@ impl Cache {
         Self { dir: dir.into() }
     }
 
-    fn path(&self, video_id: &str) -> PathBuf {
+    fn path(&self, video_id: &str, source: Source, extension: &str) -> PathBuf {
         // Video ids are [A-Za-z0-9_-], keep the file name safe anyway
         let name: String = video_id
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
             .collect();
-        self.dir.join(format!("{name}.json"))
+        self.dir
+            .join(format!("{name}.{}.{extension}", source.key()))
     }
 
-    pub fn load(&self, video_id: &str) -> Option<Lyrics> {
-        let text = std::fs::read_to_string(self.path(video_id)).ok()?;
+    pub fn load(&self, video_id: &str, source: Source) -> Option<Lyrics> {
+        let text = std::fs::read_to_string(self.path(video_id, source, "json")).ok()?;
         serde_json::from_str(&text)
             .inspect_err(|e| warn!("Corrupted lyrics cache for {video_id}: {e}"))
             .ok()
     }
 
+    /// Saves under the lyrics' own source and clears its miss marker.
     pub fn save(&self, video_id: &str, lyrics: &Lyrics) {
-        if let Err(e) = write_json(&self.path(video_id), lyrics) {
+        if let Err(e) = write_json(&self.path(video_id, lyrics.source, "json"), lyrics) {
             warn!("Can't write lyrics cache for {video_id}: {e}");
         }
+        let _ = std::fs::remove_file(self.path(video_id, lyrics.source, "miss"));
+    }
+
+    /// Remembers that `source` has no lyrics for the video, for [`MISS_TTL`].
+    pub fn mark_missing(&self, video_id: &str, source: Source) {
+        let path = self.path(video_id, source, "miss");
+        let result = std::fs::create_dir_all(&self.dir).and_then(|_| std::fs::write(&path, ""));
+        if let Err(e) = result {
+            warn!("Can't write lyrics miss marker for {video_id}: {e}");
+        }
+    }
+
+    /// Whether `source` had no lyrics for the video less than [`MISS_TTL`] ago.
+    pub fn is_missing(&self, video_id: &str, source: Source) -> bool {
+        std::fs::metadata(self.path(video_id, source, "miss"))
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age < MISS_TTL)
     }
 }
 
@@ -172,9 +236,22 @@ mod tests {
             .translations
             .insert("en".into(), Translation::default());
         cache.save("abc_-1/..", &lyrics);
-        assert_eq!(cache.load("abc_-1/.."), Some(lyrics));
-        assert!(dir.join("abc_-1.json").exists());
-        assert_eq!(cache.load("missing"), None);
+        assert_eq!(
+            cache.load("abc_-1/..", Source::Lrclib),
+            Some(lyrics.clone())
+        );
+        assert!(dir.join("abc_-1.lrclib.json").exists());
+        assert_eq!(cache.load("abc_-1/..", Source::YoutubeMusic), None);
+        assert_eq!(cache.load("missing", Source::Lrclib), None);
+
+        assert!(!cache.is_missing("x", Source::YoutubeMusic));
+        cache.mark_missing("x", Source::YoutubeMusic);
+        assert!(cache.is_missing("x", Source::YoutubeMusic));
+        assert!(!cache.is_missing("x", Source::Lrclib));
+        // Finding lyrics later clears the marker
+        let found = Lyrics::new(Source::YoutubeMusic, Vec::new());
+        cache.save("x", &found);
+        assert!(!cache.is_missing("x", Source::YoutubeMusic));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
