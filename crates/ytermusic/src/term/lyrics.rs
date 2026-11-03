@@ -47,6 +47,9 @@ const OFFSET_STEP_MS: i64 = 500;
 const SCROLL_DURATION: Duration = Duration::from_millis(220);
 /// Time for a line to fade in / out of the highlight
 const FADE_DURATION: Duration = Duration::from_millis(300);
+/// Longest wait for the player to know a song's duration when YouTube gave
+/// none: lyrics are looked up without it after that.
+const DURATION_WAIT: Duration = Duration::from_secs(10);
 
 enum State {
     /// Nothing playing
@@ -102,6 +105,11 @@ pub struct LyricsView {
     missing_on: Option<Source>,
     /// `P` had nothing while nothing was shown yet: ask the whole chain
     refetch: bool,
+    /// Song length in seconds, from YouTube or else from the player
+    duration: Option<u64>,
+    /// Waiting since then for the player to know the duration (lyrics
+    /// sources match songs on it)
+    duration_wait: Option<Instant>,
     sender: Sender<Update>,
     receiver: Receiver<Update>,
     client: HttpClient,
@@ -136,6 +144,8 @@ impl LyricsView {
             switching: None,
             missing_on: None,
             refetch: false,
+            duration: None,
+            duration_wait: None,
             sender,
             receiver,
             client: lyrics::http_client(),
@@ -172,13 +182,30 @@ impl LyricsView {
             self.translate_failed = false;
             self.switching = None;
             self.missing_on = None;
+            self.duration = current.and_then(|x| parse_duration(&x.duration));
+            self.duration_wait = None;
             self.state = match current {
+                Some(_) if self.duration.is_none() => {
+                    self.duration_wait = Some(Instant::now());
+                    State::Loading
+                }
                 Some(video) => {
                     self.fetch(video, None);
                     State::Loading
                 }
                 None => State::Idle,
             };
+        }
+        if let (Some(since), Some(video)) = (self.duration_wait, current) {
+            // The player's duration is the current song's once it plays it
+            let playing = player.rtcurrent.as_ref().map(|x| &x.video_id) == Some(&video.video_id)
+                && !player.sink.is_finished();
+            let known = playing.then(|| player.sink.duration()).flatten();
+            if known.is_some() || since.elapsed() > DURATION_WAIT {
+                self.duration = known.map(|x| x.round() as u64);
+                self.duration_wait = None;
+                self.fetch(video, None);
+            }
         }
         if let (State::Loaded(lyrics), Some(id)) = (&self.state, &self.video_id) {
             // Google is only asked for what the source does not give
@@ -254,13 +281,14 @@ impl LyricsView {
         let cache = self.cache.clone();
         let api = self.api.clone();
         let video = video.clone();
+        let duration = self.duration;
         run_service(async move {
             let id = video.video_id.clone();
             let track = Track {
                 title: &video.title,
                 artist: &video.author,
                 album: &video.album,
-                duration_secs: parse_duration(&video.duration),
+                duration_secs: duration,
             };
             let mut found = None;
             for &source in &chain {

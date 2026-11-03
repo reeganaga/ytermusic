@@ -38,28 +38,51 @@ pub async fn fetch(
     };
     let artist = title::clean_artist(track.artist);
     let name = title::clean_title(track.title, &artist);
-    info!("{} lookup: {name} / {artist}", source.label());
+    info!(
+        "{} lookup: {name} / {artist} / {:?}s",
+        source.label(),
+        track.duration_secs
+    );
 
-    let mut query = vec![("s", name), ("a", artist), ("al", track.album.to_owned())];
-    if let Some(duration) = track.duration_secs {
-        query.push(("d", duration.to_string()));
+    // The cache only matches the exact album the extension sent: the song's
+    // album, or none for a music video. Ask with YouTube Music's album, then
+    // once without when that misses.
+    let mut albums = vec![track.album.trim()];
+    if !albums[0].is_empty() {
+        albums.push("");
     }
-    let mut request = client.get(format!("{API}/{path}")).query(&query);
-    if let Some(key) = api_key.filter(|x| !x.trim().is_empty()) {
-        request = request.header("X-API-Key", key.trim());
+    let mut response = None;
+    for album in albums {
+        let mut query = vec![
+            ("s", name.clone()),
+            ("a", artist.clone()),
+            ("al", album.to_owned()),
+        ];
+        if let Some(duration) = track.duration_secs {
+            query.push(("d", duration.to_string()));
+        }
+        let mut request = client.get(format!("{API}/{path}")).query(&query);
+        if let Some(key) = api_key.filter(|x| !x.trim().is_empty()) {
+            request = request.header("X-API-Key", key.trim());
+        }
+        let answer = match request.send().await {
+            Ok(answer) => answer,
+            Err(e) => return Fetched::Failed(e.to_string()),
+        };
+        let status = answer.status();
+        if is_missing(status) {
+            debug!("{} (album {album:?}): {status}", source.label());
+            continue;
+        }
+        if !status.is_success() {
+            return Fetched::Failed(format!("HTTP {status}"));
+        }
+        response = Some(answer);
+        break;
     }
-    let response = match request.send().await {
-        Ok(response) => response,
-        Err(e) => return Fetched::Failed(e.to_string()),
-    };
-    let status = response.status();
-    if is_missing(status) {
-        debug!("{}: {status}", source.label());
+    let Some(response) = response else {
         return Fetched::Missing;
-    }
-    if !status.is_success() {
-        return Fetched::Failed(format!("HTTP {status}"));
-    }
+    };
     let body: Response = match response.json().await {
         Ok(body) => body,
         Err(e) => return Fetched::Failed(e.to_string()),
