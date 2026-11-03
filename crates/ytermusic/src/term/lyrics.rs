@@ -207,13 +207,21 @@ impl LyricsView {
                     found = Some(lyrics);
                     break;
                 }
+                if source.remembers_misses() && cache.is_missing(&id, source) {
+                    continue;
+                }
                 match fetch_from(source, &client, &track, &id, api.as_deref()).await {
                     Fetched::Found(lyrics) => {
                         cache.save(&id, &lyrics);
                         found = Some(lyrics);
                         break;
                     }
-                    Fetched::Missing => info!("No {} lyrics for {id}", source.label()),
+                    Fetched::Missing => {
+                        info!("No {} lyrics for {id}", source.label());
+                        if source.remembers_misses() {
+                            cache.mark_missing(&id, source);
+                        }
+                    }
                     Fetched::Failed(e) => error!("{} lyrics: {e}", source.label()),
                 }
             }
@@ -386,7 +394,7 @@ impl LyricsView {
 }
 
 /// Sources asked in order until one has the song's lyrics.
-const CHAIN: &[Source] = &[Source::Lrclib, Source::YoutubeMusic];
+const CHAIN: &[Source] = &[Source::BetterLyrics, Source::Lrclib, Source::YoutubeMusic];
 
 async fn fetch_from(
     source: Source,
@@ -396,6 +404,9 @@ async fn fetch_from(
     api: Option<&YoutubeMusicInstance>,
 ) -> Fetched {
     match source {
+        Source::BetterLyrics | Source::BetterLyricsQq => {
+            lyrics::betterlyrics::fetch(client, source, track, None).await
+        }
         Source::Lrclib => lyrics::lrclib::fetch(client, track).await.into(),
         Source::YoutubeMusic => match api {
             Some(api) => api

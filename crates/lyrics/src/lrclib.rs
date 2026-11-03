@@ -42,10 +42,7 @@ impl LrclibTrack {
         if let Some(synced) = self.synced_lyrics.filter(|x| !x.trim().is_empty()) {
             let lines: Vec<Line> = lrc::parse(&synced)
                 .into_iter()
-                .map(|(time, text)| Line {
-                    time_ms: Some(time),
-                    text,
-                })
+                .map(|(time, text)| Line::new(Some(time), text))
                 .collect();
             if !lines.is_empty() {
                 return Some(Lyrics::new(Source::Lrclib, lines));

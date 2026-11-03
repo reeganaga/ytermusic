@@ -2907,6 +2907,7 @@ name = "lyrics"
 version = "0.1.0"
 dependencies = [
  "log",
+ "quick-xml",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
@@ -4093,6 +4094,15 @@ dependencies = [
  "rand_xoshiro",
  "ref-cast",
  "wide",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

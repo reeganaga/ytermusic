@@ -1,5 +1,6 @@
-//! Song lyrics: time-synced lyrics from LRCLIB, LRC parsing, translation and
-//! romanization through Google Translate, and an on-disk cache.
+//! Song lyrics: word-synced lyrics from Better Lyrics (TTML, QQ), line-synced
+//! lyrics from LRCLIB, translation and romanization through Google Translate,
+//! and an on-disk cache.
 //!
 //! The YouTube Music fallback lives in `ytpapi2`; its plain text goes through
 //! [`Lyrics::from_plain`].
@@ -13,10 +14,12 @@ use std::{
 use log::warn;
 use serde::{Deserialize, Serialize};
 
+pub mod betterlyrics;
 pub mod lrc;
 pub mod lrclib;
 pub mod title;
 pub mod translate;
+pub mod ttml;
 
 pub use lrclib::Track;
 pub use reqwest::Client as HttpClient;
@@ -26,6 +29,10 @@ pub use translate::Translation;
 pub enum Source {
     Lrclib,
     YoutubeMusic,
+    /// Better Lyrics' default TTML provider
+    BetterLyrics,
+    /// Better Lyrics' QQ Music provider
+    BetterLyricsQq,
 }
 
 impl Source {
@@ -34,6 +41,8 @@ impl Source {
         match self {
             Source::Lrclib => "lrclib",
             Source::YoutubeMusic => "youtube",
+            Source::BetterLyrics => "betterlyrics",
+            Source::BetterLyricsQq => "betterlyrics-qq",
         }
     }
 
@@ -42,7 +51,15 @@ impl Source {
         match self {
             Source::Lrclib => "LRCLIB",
             Source::YoutubeMusic => "YouTube Music",
+            Source::BetterLyrics => "BetterLyrics",
+            Source::BetterLyricsQq => "BetterLyrics (QQ)",
         }
+    }
+
+    /// Whether "not found" answers are remembered ([`Cache::mark_missing`]):
+    /// Better Lyrics is rate limited, so a miss is not asked again every play.
+    pub fn remembers_misses(self) -> bool {
+        matches!(self, Source::BetterLyrics | Source::BetterLyricsQq)
     }
 }
 
@@ -66,11 +83,67 @@ impl From<Result<Option<Lyrics>, String>> for Fetched {
     }
 }
 
+/// A timed word or syllable. Its text keeps the space that follows it, so
+/// the words of a line put together give the line's text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Word {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+/// Where a line is drawn: duets put the second singer on the right and lines
+/// sung together in the middle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    fn is_left(&self) -> bool {
+        *self == Align::Left
+    }
+}
+
+/// Text attached to a line by the source (romanization), with word timings
+/// when it has them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Extra {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Word>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
     /// Start time; `None` for unsynced lyrics
     pub time_ms: Option<u64>,
     pub text: String,
+    /// Word timings (karaoke); empty for line-synced lyrics. Their texts put
+    /// together are `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Word>,
+    #[serde(default, skip_serializing_if = "Align::is_left")]
+    pub align: Align,
+    /// Romanization given by the source
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub romanized: Option<Extra>,
+}
+
+impl Line {
+    /// A line without word timings, romanization or alignment.
+    pub fn new(time_ms: Option<u64>, text: impl Into<String>) -> Self {
+        Self {
+            time_ms,
+            text: text.into(),
+            words: Vec::new(),
+            align: Align::Left,
+            romanized: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,6 +155,9 @@ pub struct Lyrics {
     /// Translations already fetched, by target language
     #[serde(default)]
     pub translations: HashMap<String, Translation>,
+    /// Translations given by the source, by language: one entry per line
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub builtin_translations: HashMap<String, Vec<Option<String>>>,
 }
 
 impl Lyrics {
@@ -91,6 +167,7 @@ impl Lyrics {
             instrumental: false,
             lines,
             translations: HashMap::new(),
+            builtin_translations: HashMap::new(),
         }
     }
 
@@ -106,10 +183,7 @@ impl Lyrics {
         let lines = text
             .trim()
             .lines()
-            .map(|line| Line {
-                time_ms: None,
-                text: line.trim().to_owned(),
-            })
+            .map(|line| Line::new(None, line.trim()))
             .collect();
         Self::new(source, lines)
     }
@@ -127,9 +201,23 @@ impl Lyrics {
     pub fn texts(&self) -> Vec<String> {
         self.lines.iter().map(|x| x.text.clone()).collect()
     }
+
+    /// Whether some line has a romanization from the source.
+    pub fn has_builtin_romanization(&self) -> bool {
+        self.lines.iter().any(|x| x.romanized.is_some())
+    }
+
+    /// The source's translation into `language` (`en` matches `en-US`).
+    pub fn builtin_translation(&self, language: &str) -> Option<&Vec<Option<String>>> {
+        let wanted = translate::base_language(language);
+        self.builtin_translations
+            .iter()
+            .find(|(lang, _)| translate::base_language(lang) == wanted)
+            .map(|(_, lines)| lines)
+    }
 }
 
-/// HTTP client for LRCLIB and Google Translate.
+/// HTTP client for Better Lyrics, LRCLIB and Google Translate.
 pub fn http_client() -> HttpClient {
     reqwest::Client::builder()
         .user_agent(concat!(
@@ -225,13 +313,7 @@ mod tests {
     fn cache_roundtrip() {
         let dir = std::env::temp_dir().join(format!("lyrics-test-{}", std::process::id()));
         let cache = Cache::new(&dir);
-        let mut lyrics = Lyrics::new(
-            Source::Lrclib,
-            vec![Line {
-                time_ms: Some(1000),
-                text: "x".into(),
-            }],
-        );
+        let mut lyrics = Lyrics::new(Source::Lrclib, vec![Line::new(Some(1000), "x")]);
         lyrics
             .translations
             .insert("en".into(), Translation::default());

@@ -131,7 +131,8 @@ fn finish(
     }
 }
 
-fn base_language(code: &str) -> String {
+/// `zh-CN` -> `zh`, `en_US` -> `en`.
+pub fn base_language(code: &str) -> String {
     code.split(['-', '_'])
         .next()
         .unwrap_or(code)
