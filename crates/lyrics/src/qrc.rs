@@ -1,0 +1,189 @@
+//! Parser for QRC, QQ Music's word-synced lyrics (served by Better Lyrics).
+//!
+//! The lyrics sit in the `LyricContent` attribute of a `<Lyric_1>` element,
+//! one line per text line: `[start,duration]word(start,duration)word(...)`,
+//! times in milliseconds. The first lines are usually credits
+//! (`Title - Artist`, `Lyrics by：...`) and are dropped.
+
+use quick_xml::{events::Event, Reader};
+
+use crate::{lrc, Line, Lyrics, Source, Word};
+
+/// QQ's text for songs without lyrics.
+const INSTRUMENTAL: &str = "纯音乐";
+/// Credit line labels.
+const CREDITS: &[&str] = &[
+    "作词",
+    "作曲",
+    "编曲",
+    "制作",
+    "词：",
+    "曲：",
+    "lyrics by",
+    "composed by",
+    "produced by",
+    "written by",
+    "arranged by",
+    "lyricist",
+    "composer",
+    "producer",
+];
+
+/// Parses a QRC document (or plain LRC text, which QQ sometimes returns).
+pub fn parse(document: &str, source: Source) -> Result<Lyrics, String> {
+    let content = match lyric_content(document)? {
+        Some(content) => content,
+        None => document.to_owned(),
+    };
+    let mut lines: Vec<Line> = content.lines().filter_map(parse_line).collect();
+    if lines.is_empty() {
+        // Not QRC: maybe LRC
+        lines = lrc::parse(&content)
+            .into_iter()
+            .map(|(time, text)| Line::new(Some(time), text))
+            .collect();
+    }
+    let start = lines
+        .iter()
+        .enumerate()
+        .position(|(i, line)| !is_credit(i, &line.text))
+        .unwrap_or(lines.len());
+    lines.drain(..start);
+    if lines.len() == 1 && lines[0].text.contains(INSTRUMENTAL) {
+        return Ok(Lyrics::instrumental(source));
+    }
+    if lines.is_empty() {
+        return Err("QRC: no lyrics line".to_owned());
+    }
+    lines.sort_by_key(|x| x.time_ms);
+    Ok(Lyrics::new(source, lines))
+}
+
+/// The `LyricContent` attribute, `None` when the document is not XML.
+fn lyric_content(document: &str) -> Result<Option<String>, String> {
+    if !document.trim_start().starts_with('<') {
+        return Ok(None);
+    }
+    let mut reader = Reader::from_str(document);
+    loop {
+        match reader.read_event().map_err(|e| format!("QRC: {e}"))? {
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref().starts_with(b"Lyric_") => {
+                let content = e
+                    .attributes()
+                    .flatten()
+                    .find(|x| x.key.as_ref() == b"LyricContent")
+                    .and_then(|x| x.unescape_value().ok())
+                    .map(|x| x.into_owned());
+                if content.is_some() {
+                    return Ok(content);
+                }
+            }
+            Event::Eof => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+/// `[351,1039]I (351,397)love(748,642)` -> a line at 351ms with two words.
+fn parse_line(raw: &str) -> Option<Line> {
+    let rest = raw.trim().strip_prefix('[')?;
+    let (head, body) = rest.split_once(']')?;
+    let (start, _) = parse_pair(head)?;
+    let mut words = Vec::new();
+    let mut text_start = 0;
+    let mut search = 0;
+    while let Some(open) = body[search..].find('(').map(|i| i + search) {
+        let Some(close) = body[open..].find(')').map(|i| i + open) else {
+            break;
+        };
+        match parse_pair(&body[open + 1..close]) {
+            Some((word_start, duration)) => {
+                let text = &body[text_start..open];
+                if !text.is_empty() {
+                    words.push(Word {
+                        start_ms: word_start,
+                        end_ms: word_start + duration,
+                        text: text.to_owned(),
+                    });
+                }
+                text_start = close + 1;
+                search = close + 1;
+            }
+            // A parenthesis in the lyrics themselves
+            None => search = open + 1,
+        }
+    }
+    if words.is_empty() {
+        let text = body.trim();
+        return (!text.is_empty()).then(|| Line::new(Some(start), text));
+    }
+    if let Some(first) = words.first_mut() {
+        first.text = first.text.trim_start().to_owned();
+    }
+    if let Some(last) = words.last_mut() {
+        last.text = last.text.trim_end().to_owned();
+    }
+    words.retain(|x| !x.text.is_empty());
+    let text: String = words.iter().map(|x| x.text.as_str()).collect();
+    let mut line = Line::new(Some(start), text);
+    line.words = words;
+    Some(line)
+}
+
+/// `351,1039` -> (351, 1039).
+fn parse_pair(text: &str) -> Option<(u64, u64)> {
+    let (a, b) = text.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Credit lines at the top: `Title - Artist` first, then `Label：names`.
+fn is_credit(index: usize, text: &str) -> bool {
+    let lower = text.to_lowercase();
+    (index == 0 && text.contains(" - "))
+        || text.contains('：')
+        || CREDITS.iter().any(|x| lower.starts_with(x))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOC: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<QrcInfos>
+<QrcHeadInfo SaveTime="153" Version="100"/>
+<LyricInfo LyricCount="1">
+<Lyric_1 LyricType="1" LyricContent="[ti:E85 (Explicit)]
+[ar:Don Toliver]
+[offset:0]
+[0,51]E(0,10)85 ((10,10)Explicit) - (21,10)Don (31,10)Toliver(41,10)
+[52,205]Lyrics (52,10)by：(62,10)Someone(72,10)
+[351,1039]I (351,397)love(748,642)
+[3323,800]Tryin&apos; (3323,246)(so (3569,300)hard)(3869,254)
+"/>
+</LyricInfo>
+</QrcInfos>"#;
+
+    #[test]
+    fn parses_words_and_drops_credits() {
+        let lyrics = parse(DOC, Source::BetterLyricsQq).unwrap();
+        assert_eq!(lyrics.lines.len(), 2);
+        let line = &lyrics.lines[0];
+        assert_eq!(line.time_ms, Some(351));
+        assert_eq!(line.text, "I love");
+        assert_eq!(line.words.len(), 2);
+        assert_eq!((line.words[1].start_ms, line.words[1].end_ms), (748, 1390));
+        let line = &lyrics.lines[1];
+        assert_eq!(line.text, "Tryin' (so hard)");
+        let joined: String = line.words.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(joined, line.text);
+    }
+
+    #[test]
+    fn instrumental_and_lrc_fallback() {
+        let doc = r#"<QrcInfos><LyricInfo><Lyric_1 LyricContent="[0,1000]此歌曲为没有填词的纯音乐，请您欣赏(0,1000)"/></LyricInfo></QrcInfos>"#;
+        assert!(parse(doc, Source::BetterLyricsQq).unwrap().instrumental);
+        let lyrics = parse("[00:01.00]hello\n[00:02.00]world", Source::BetterLyricsQq).unwrap();
+        assert_eq!(lyrics.texts(), vec!["hello", "world"]);
+        assert!(parse("<QrcInfos/>", Source::BetterLyricsQq).is_err());
+    }
+}

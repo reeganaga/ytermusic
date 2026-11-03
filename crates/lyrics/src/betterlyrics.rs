@@ -9,7 +9,7 @@ use log::{debug, info};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::{title, ttml, Fetched, Source, Track};
+use crate::{qrc, title, ttml, Fetched, Source, Track};
 
 const API: &str = "https://api.betterlyrics.org";
 
@@ -66,7 +66,7 @@ pub async fn fetch(
     };
     let parsed = match source {
         Source::BetterLyrics => body.ttml.map(|x| ttml::parse(&x, source)),
-        _ => body.lyrics.map(|_| Err("unsupported provider".to_owned())),
+        _ => body.lyrics.map(|x| qrc::parse(&x, source)),
     };
     match parsed {
         Some(Ok(lyrics)) => Fetched::Found(lyrics),

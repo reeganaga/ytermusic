@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 pub mod betterlyrics;
 pub mod lrc;
 pub mod lrclib;
+pub mod qrc;
 pub mod title;
 pub mod translate;
 pub mod ttml;
