@@ -1,7 +1,8 @@
 //! Lyrics panel: takes the place of the queue on the player screen (`y`).
 //! Synced lyrics follow the song with the active line kept near the top third;
 //! the romanization and translation of each line are shown under it. With
-//! word timings (Better Lyrics) the active line fills word by word.
+//! word timings (Better Lyrics) the active line fills word by word. In duets
+//! the second singer's lines are on the right, lines sung together centered.
 //!
 //! Lyrics are only fetched while this panel is visible: `render` notices the
 //! playing song changed and starts a fetch.
@@ -15,7 +16,7 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use flume::{Receiver, Sender};
 use log::{error, info};
-use lyrics::{lrc, Cache, Fetched, HttpClient, Lyrics, Source, Track, Translation, Word};
+use lyrics::{lrc, Align, Cache, Fetched, HttpClient, Lyrics, Source, Track, Translation, Word};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -314,6 +315,7 @@ impl LyricsView {
                     kind: RowKind::Blank,
                     line: i,
                     words: Vec::new(),
+                    align: Align::Left,
                 });
             }
             layout.starts.push(layout.rows.len());
@@ -328,6 +330,7 @@ impl LyricsView {
             } else {
                 &[]
             };
+            layout.align = line.align;
             layout.push_wrapped(&original, RowKind::Main, i, words);
             if let Some(romanized) = extra(romanized, i) {
                 layout.push_wrapped(romanized, RowKind::Romanized, i, &[]);
@@ -505,6 +508,7 @@ struct Row {
     line: usize,
     /// Timed words of the row (karaoke): byte range in `text`, start time
     words: Vec<(Range<usize>, u64)>,
+    align: Align,
 }
 
 #[derive(Default)]
@@ -513,6 +517,8 @@ struct Layout {
     rows: Vec<Row>,
     /// First row of each lyric line
     starts: Vec<usize>,
+    /// Alignment of the rows pushed next (the line's singer)
+    align: Align,
 }
 
 impl Layout {
@@ -542,6 +548,7 @@ impl Layout {
                 kind,
                 line,
                 words,
+                align: self.align,
             });
         }
     }
@@ -694,15 +701,23 @@ impl Screen for LyricsView {
         for (i, row) in layout.rows.iter().skip(self.top).take(height).enumerate() {
             let y = content.y + i as u16;
             let style = self.row_style(row.kind, row.line, active, synced);
+            // Duets: second singer on the right, everyone together centered
+            let free = content.width.saturating_sub(row.text.width() as u16);
+            let left = content.x
+                + match row.align {
+                    Align::Right => free,
+                    Align::Center => free / 2,
+                    Align::Left => 0,
+                };
             if active != Some(row.line) || row.words.is_empty() {
-                buf.set_stringn(content.x, y, &row.text, width, style);
+                buf.set_stringn(left, y, &row.text, width, style);
                 continue;
             }
             // Karaoke: sung words in the accent color
             let t = theme();
             let sung = style.fg(t.accent);
             let unsung = style.fg(t.text);
-            let mut x = content.x;
+            let mut x = left;
             let mut cursor = 0;
             let right = content.x + content.width;
             let mut draw = |x: &mut u16, text: &str, style: Style| {
