@@ -65,6 +65,10 @@ pub async fn translate(
         }
         let joined = texts.join(&format!(" {ROMAN_SEPARATOR} "));
         let response = request(client, &joined, target, Mode::Romanize).await?;
+        if response.text.trim().is_empty() {
+            // Nothing Google can romanize (e.g. a stray symbol in English lyrics)
+            continue;
+        }
         match split_exact(&response.text, ROMAN_SEPARATOR, texts.len()) {
             Some(parts) => assign(&mut romanized, &chunk, parts),
             None => {
@@ -211,6 +215,14 @@ async fn request(
 /// translations, `[[[null,null,null,"source in latin letters"]], null, "ja"]`
 /// for romanizations.
 fn parse_response(json: &Value, mode: Mode) -> Option<Response> {
+    let language = json.get(2).and_then(Value::as_str).map(str::to_owned);
+    // `[null, null, "en", ..]`: nothing to romanize / translate
+    if json.get(0).is_some_and(Value::is_null) && json.get(2).is_some() {
+        return Some(Response {
+            text: String::new(),
+            language,
+        });
+    }
     let segments = json.get(0)?.as_array()?;
     let mut text = String::new();
     for segment in segments {
@@ -223,10 +235,7 @@ fn parse_response(json: &Value, mode: Mode) -> Option<Response> {
             text.push_str(part);
         }
     }
-    Some(Response {
-        text,
-        language: json.get(2).and_then(Value::as_str).map(str::to_owned),
-    })
+    Some(Response { text, language })
 }
 
 #[cfg(test)]
@@ -260,6 +269,12 @@ mod tests {
         );
         assert_eq!(split_exact(&response.text, ROMAN_SEPARATOR, 3), None);
         assert!(parse_response(&json!({}), Mode::Translate).is_none());
+
+        // Google answers this when there is nothing to romanize
+        let json = json!([null, null, "en", null, null, null, 1, []]);
+        let response = parse_response(&json, Mode::Romanize).unwrap();
+        assert!(response.text.is_empty());
+        assert_eq!(response.language.as_deref(), Some("en"));
     }
 
     #[test]
