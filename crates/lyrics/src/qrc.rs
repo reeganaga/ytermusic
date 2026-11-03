@@ -27,6 +27,22 @@ const CREDITS: &[&str] = &[
     "producer",
 ];
 
+/// Credit labels of fan covers (`原曲：` original song, `翻唱：` cover
+/// singers, `中翻` Chinese translation), which QQ sometimes returns instead of
+/// the original song.
+const COVER: &[&str] = &["原曲", "翻唱", "中翻", "翻译填词"];
+
+/// Whether the lyrics are a fan cover rather than the song itself: looks for
+/// cover credits in the first lines.
+pub fn is_cover(document: &str) -> bool {
+    let content = lyric_content(document).unwrap_or_else(|| document.to_owned());
+    content
+        .lines()
+        .filter(|x| !x.trim().is_empty())
+        .take(15)
+        .any(|line| COVER.iter().any(|x| line.contains(x)))
+}
+
 /// Parses a QRC document (or plain LRC text, which QQ sometimes returns).
 pub fn parse(document: &str, source: Source) -> Result<Lyrics, String> {
     let content = lyric_content(document).unwrap_or_else(|| document.to_owned());
@@ -165,6 +181,16 @@ mod tests {
         assert_eq!(line.text, "Tryin' (so hard)");
         let joined: String = line.words.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(joined, line.text);
+    }
+
+    #[test]
+    fn detects_fan_covers() {
+        let doc = r#"<QrcInfos><LyricInfo><Lyric_1 LyricContent="[4871,1000]— 宅舞曲目中翻企划07 —(4871,1000)
+[5990,1000]原曲：花になって - 绿黄色社会(5990,1000)
+[10748,1000]翻唱：蚂蚁(10748,1000)
+[15403,1000]屏默的呼吸(15403,1000)"/></LyricInfo></QrcInfos>"#;
+        assert!(is_cover(doc));
+        assert!(!is_cover(DOC));
     }
 
     #[test]

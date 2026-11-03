@@ -89,7 +89,14 @@ pub async fn fetch(
     };
     let parsed = match source {
         Source::BetterLyrics => body.ttml.map(|x| ttml::parse(&x, source)),
-        _ => body.lyrics.map(|x| qrc::parse(&x, source)),
+        _ => match body.lyrics {
+            // A fan cover matched instead of the song: let the next source try
+            Some(x) if qrc::is_cover(&x) => {
+                info!("{}: fan cover lyrics, skipped", source.label());
+                return Fetched::Missing;
+            }
+            x => x.map(|x| qrc::parse(&x, source)),
+        },
     };
     match parsed {
         Some(Ok(lyrics)) => Fetched::Found(lyrics),
