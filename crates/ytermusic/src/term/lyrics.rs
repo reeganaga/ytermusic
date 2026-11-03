@@ -16,7 +16,9 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use flume::{Receiver, Sender};
 use log::{error, info};
-use lyrics::{lrc, Align, Cache, Fetched, HttpClient, Lyrics, Source, Track, Translation, Word};
+use lyrics::{
+    lrc, Align, Cache, Fetched, HttpClient, Lyrics, Provider, Source, Track, Translation, Word,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -55,10 +57,12 @@ enum State {
 }
 
 enum Update {
-    /// Lyrics of a video, `None` when no source has them
-    Lyrics(String, Option<Lyrics>),
-    /// Translation of a video's lyrics into a language
-    Translation(String, String, Result<Translation, String>),
+    /// Lyrics of a video for a fetch (generation), `None` when no source has them
+    Lyrics(String, u64, Option<Lyrics>),
+    /// The provider picked with `P` has no lyrics for the video
+    ProviderMiss(String, u64, Source),
+    /// Translation of a video's lyrics (from a source) into a language
+    Translation(String, Source, String, Result<Translation, String>),
 }
 
 pub struct LyricsView {
@@ -89,6 +93,15 @@ pub struct LyricsView {
     word_sync: bool,
     /// When the next word (or line) starts: the panel is redrawn then
     next_change: Option<Instant>,
+    provider: Provider,
+    /// Latest fetch: older answers are dropped
+    generation: u64,
+    /// Provider being asked after `P`, the shown lyrics stay meanwhile
+    switching: Option<Source>,
+    /// Provider picked with `P` that had nothing for this song
+    missing_on: Option<Source>,
+    /// `P` had nothing while nothing was shown yet: ask the whole chain
+    refetch: bool,
     sender: Sender<Update>,
     receiver: Receiver<Update>,
     client: HttpClient,
@@ -118,6 +131,11 @@ impl LyricsView {
             fade: None,
             word_sync: CONFIG.lyrics.word_sync,
             next_change: None,
+            provider: CONFIG.lyrics.provider,
+            generation: 0,
+            switching: None,
+            missing_on: None,
+            refetch: false,
             sender,
             receiver,
             client: lyrics::http_client(),
@@ -136,6 +154,11 @@ impl LyricsView {
             self.apply(update);
         }
         let current = player.current();
+        if std::mem::take(&mut self.refetch) {
+            if let Some(video) = current.filter(|x| Some(&x.video_id) == self.video_id.as_ref()) {
+                self.fetch(video, None);
+            }
+        }
         if current.map(|x| &x.video_id) != self.video_id.as_ref() {
             self.video_id = current.map(|x| x.video_id.clone());
             self.offset_ms = 0;
@@ -147,9 +170,11 @@ impl LyricsView {
             self.fade = None;
             self.translating = false;
             self.translate_failed = false;
+            self.switching = None;
+            self.missing_on = None;
             self.state = match current {
                 Some(video) => {
-                    self.fetch(video);
+                    self.fetch(video, None);
                     State::Loading
                 }
                 None => State::Idle,
@@ -166,23 +191,40 @@ impl LyricsView {
                 && !lyrics.translations.contains_key(Self::target())
             {
                 self.translating = true;
-                self.fetch_translation(id.clone(), lyrics.texts());
+                self.fetch_translation(id.clone(), lyrics.source, lyrics.texts());
             }
         }
     }
 
     fn apply(&mut self, update: Update) {
         self.layout = None;
+        let current = |id: &String, generation: u64| {
+            Some(id) == self.video_id.as_ref() && generation == self.generation
+        };
         match update {
-            Update::Lyrics(id, lyrics) if Some(&id) == self.video_id.as_ref() => {
+            Update::Lyrics(id, generation, lyrics) if current(&id, generation) => {
+                self.switching = None;
+                self.translating = false;
+                self.translate_failed = false;
+                self.manual = None;
                 self.state = match lyrics {
                     Some(lyrics) => State::Loaded(lyrics),
                     None => State::NotFound,
                 };
             }
-            Update::Translation(id, target, result) if Some(&id) == self.video_id.as_ref() => {
+            Update::ProviderMiss(id, generation, source) if current(&id, generation) => {
+                self.switching = None;
+                self.missing_on = Some(source);
+                // `P` while loading dropped the first fetch: run it again
+                self.refetch = matches!(self.state, State::Loading);
+            }
+            Update::Translation(id, source, target, result)
+                if Some(&id) == self.video_id.as_ref() =>
+            {
                 self.translating = false;
                 match (result, &mut self.state) {
+                    // Dropped when the lyrics changed source meanwhile
+                    (Ok(_), State::Loaded(lyrics)) if lyrics.source != source => {}
                     (Ok(translation), State::Loaded(lyrics)) => {
                         lyrics.translations.insert(target, translation);
                         self.cache.save(&id, lyrics);
@@ -198,7 +240,15 @@ impl LyricsView {
         }
     }
 
-    fn fetch(&self, video: &YoutubeMusicVideoRef) {
+    /// Fetches the lyrics through the provider's chain, or only from `only`
+    /// (after `P`: its miss marker is ignored, a miss keeps the shown lyrics).
+    fn fetch(&mut self, video: &YoutubeMusicVideoRef, only: Option<Source>) {
+        self.generation += 1;
+        let generation = self.generation;
+        let chain = match only {
+            Some(source) => vec![source],
+            None => self.provider.chain(),
+        };
         let sender = self.sender.clone();
         let client = self.client.clone();
         let cache = self.cache.clone();
@@ -213,12 +263,12 @@ impl LyricsView {
                 duration_secs: parse_duration(&video.duration),
             };
             let mut found = None;
-            for &source in CHAIN {
+            for &source in &chain {
                 if let Some(lyrics) = cache.load(&id, source) {
                     found = Some(lyrics);
                     break;
                 }
-                if source.remembers_misses() && cache.is_missing(&id, source) {
+                if only.is_none() && source.remembers_misses() && cache.is_missing(&id, source) {
                     continue;
                 }
                 match fetch_from(source, &client, &track, &id, api.as_deref()).await {
@@ -236,17 +286,38 @@ impl LyricsView {
                     Fetched::Failed(e) => error!("{} lyrics: {e}", source.label()),
                 }
             }
-            let _ = sender.send(Update::Lyrics(id, found));
+            let update = match (found, only) {
+                (None, Some(source)) => Update::ProviderMiss(id, generation, source),
+                (found, _) => Update::Lyrics(id, generation, found),
+            };
+            let _ = sender.send(update);
         });
     }
 
-    fn fetch_translation(&self, id: String, lines: Vec<String>) {
+    /// `P`: next provider, saved to the config, asked for the current song.
+    fn cycle_provider(&mut self, ctx: &Ctx) -> EventResponse {
+        self.provider = self.provider.next();
+        let source = self.provider.source();
+        let mut notice = format!("Lyrics provider: {}", source.label());
+        if let Err(e) = config::save_lyrics_provider(self.provider) {
+            error!("Can't save lyrics provider: {e}");
+            notice.push_str(" (not saved to config)");
+        }
+        self.missing_on = None;
+        if let Some(video) = ctx.player.current().cloned() {
+            self.switching = Some(source);
+            self.fetch(&video, Some(source));
+        }
+        ManagerMessage::Notify(notice).event()
+    }
+
+    fn fetch_translation(&self, id: String, source: Source, lines: Vec<String>) {
         let sender = self.sender.clone();
         let client = self.client.clone();
         let target = Self::target().to_owned();
         run_service(async move {
             let result = lyrics::translate::translate(&client, &lines, &target).await;
-            let _ = sender.send(Update::Translation(id, target, result));
+            let _ = sender.send(Update::Translation(id, source, target, result));
         });
     }
 
@@ -279,8 +350,17 @@ impl LyricsView {
 
     fn title(&self) -> String {
         let mut title = "Lyrics".to_owned();
+        if let State::Loaded(lyrics) = &self.state {
+            title.push_str(" · ");
+            title.push_str(lyrics.source.label());
+        }
         if matches!(&self.state, State::Loaded(l) if !l.synced() && !l.instrumental) {
             title.push_str(" · unsynced");
+        }
+        if let Some(source) = self.switching {
+            title.push_str(&format!(" · asking {}…", source.label()));
+        } else if let Some(source) = self.missing_on {
+            title.push_str(&format!(" · ⚠ not on {}", source.label()));
         }
         if self.offset_ms != 0 {
             title.push_str(&format!(
@@ -463,9 +543,6 @@ impl LyricsView {
     }
 }
 
-/// Sources asked in order until one has the song's lyrics.
-const CHAIN: &[Source] = &[Source::BetterLyrics, Source::Lrclib, Source::YoutubeMusic];
-
 async fn fetch_from(
     source: Source,
     client: &HttpClient,
@@ -475,7 +552,8 @@ async fn fetch_from(
 ) -> Fetched {
     match source {
         Source::BetterLyrics | Source::BetterLyricsQq => {
-            lyrics::betterlyrics::fetch(client, source, track, None).await
+            let key = Some(CONFIG.lyrics.betterlyrics_api_key.as_str());
+            lyrics::betterlyrics::fetch(client, source, track, key).await
         }
         Source::Lrclib => lyrics::lrclib::fetch(client, track).await.into(),
         Source::YoutubeMusic => match api {
@@ -633,7 +711,7 @@ fn wrap_ranges(text: &str, width: usize) -> Vec<Range<usize>> {
 }
 
 impl Screen for LyricsView {
-    fn on_key(&mut self, key: KeyEvent, _: &Ctx) -> Option<EventResponse> {
+    fn on_key(&mut self, key: KeyEvent, ctx: &Ctx) -> Option<EventResponse> {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.scroll(-1),
             KeyCode::Down | KeyCode::Char('j') => self.scroll(1),
@@ -644,6 +722,7 @@ impl Screen for LyricsView {
             KeyCode::Char('c') => self.manual = None,
             KeyCode::Char('R') => return Some(self.toggle(true)),
             KeyCode::Char('T') => return Some(self.toggle(false)),
+            KeyCode::Char('P') => return Some(self.cycle_provider(ctx)),
             KeyCode::Char('[') => self.offset_ms -= OFFSET_STEP_MS,
             KeyCode::Char(']') => self.offset_ms += OFFSET_STEP_MS,
             _ => return None,
@@ -777,7 +856,11 @@ impl Screen for LyricsView {
         if self.synced() {
             hints.push(hint("c", "center", "ctr"));
         }
-        hints.extend([hint("R", "romaji", "rom"), hint("T", "translate", "tr")]);
+        hints.extend([
+            hint("R", "romaji", "rom"),
+            hint("T", "translate", "tr"),
+            hint("P", "provider", "prov"),
+        ]);
         if self.synced() {
             hints.push(hint("[/]", "offset ±0.5s", "ofs"));
         }

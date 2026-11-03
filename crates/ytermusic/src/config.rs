@@ -271,6 +271,17 @@ pub struct LyricsConfig {
     /// (Better Lyrics). Redraws when each word starts.
     #[serde(default = "default_true")]
     pub word_sync: bool,
+    /// Where lyrics come from first: "betterlyrics" (word-synced, default),
+    /// "betterlyrics-qq" (QQ Music, good for Asian songs) or "lrclib". LRCLIB
+    /// then YouTube Music are tried when it has nothing. Cycled with `P`,
+    /// which saves the new value here.
+    #[serde(default)]
+    pub provider: lyrics::Provider,
+    /// Better Lyrics API key, sent as `X-API-Key`. Without one only songs
+    /// already in Better Lyrics' cache are found. Keys are not handed out to
+    /// new users at the moment.
+    #[serde(default)]
+    pub betterlyrics_api_key: String,
 }
 
 impl Default for LyricsConfig {
@@ -281,6 +292,8 @@ impl Default for LyricsConfig {
             translate_to: default_translate_to(),
             animate: true,
             word_sync: true,
+            provider: lyrics::Provider::default(),
+            betterlyrics_api_key: String::new(),
         }
     }
 }
@@ -350,14 +363,33 @@ impl Config {
 /// Saves the lyrics toggles in `config.toml`, keeping the rest of the file
 /// (comments, formatting) untouched.
 pub fn save_lyrics_toggles(romanize: bool, translate: bool) -> Result<(), String> {
+    save_lyrics_values(&[
+        ("romanize", toml_edit::value(romanize)),
+        ("translate", toml_edit::value(translate)),
+    ])
+}
+
+/// Saves the lyrics provider in `config.toml` (see [`save_lyrics_toggles`]).
+pub fn save_lyrics_provider(provider: lyrics::Provider) -> Result<(), String> {
+    save_lyrics_values(&[("provider", toml_edit::value(provider_name(provider)))])
+}
+
+fn provider_name(provider: lyrics::Provider) -> String {
+    toml::Value::try_from(provider)
+        .ok()
+        .and_then(|x| x.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn save_lyrics_values(values: &[(&str, toml_edit::Item)]) -> Result<(), String> {
     let dirs = get_project_dirs().ok_or("no config directory")?;
     let path = dirs.config_dir().join("config.toml");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let text = with_lyrics_toggles(&text, romanize, translate)?;
+    let text = with_lyrics_values(&text, values)?;
     std::fs::write(&path, text).map_err(|e| e.to_string())
 }
 
-fn with_lyrics_toggles(config: &str, romanize: bool, translate: bool) -> Result<String, String> {
+fn with_lyrics_values(config: &str, values: &[(&str, toml_edit::Item)]) -> Result<String, String> {
     let mut doc = config
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| e.to_string())?;
@@ -366,9 +398,31 @@ fn with_lyrics_toggles(config: &str, romanize: bool, translate: bool) -> Result<
         .or_insert_with(toml_edit::table)
         .as_table_like_mut()
         .ok_or("[lyrics] is not a table")?;
-    lyrics.insert("romanize", toml_edit::value(romanize));
-    lyrics.insert("translate", toml_edit::value(translate));
+    for (key, value) in values {
+        lyrics.insert(key, value.clone());
+    }
     Ok(doc.to_string())
+}
+
+#[cfg(test)]
+fn with_lyrics_toggles(config: &str, romanize: bool, translate: bool) -> Result<String, String> {
+    with_lyrics_values(
+        config,
+        &[
+            ("romanize", toml_edit::value(romanize)),
+            ("translate", toml_edit::value(translate)),
+        ],
+    )
+}
+
+#[test]
+fn lyrics_provider_is_saved() {
+    let value = provider_name(lyrics::Provider::BetterLyricsQq);
+    let saved = with_lyrics_values("", &[("provider", toml_edit::value(value))]).unwrap();
+    let parsed: Config = toml::from_str(&saved).unwrap();
+    assert_eq!(parsed.lyrics.provider, lyrics::Provider::BetterLyricsQq);
+    let parsed: Config = toml::from_str("").unwrap();
+    assert_eq!(parsed.lyrics.provider, lyrics::Provider::BetterLyrics);
 }
 
 #[test]

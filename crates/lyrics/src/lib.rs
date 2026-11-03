@@ -64,6 +64,52 @@ impl Source {
     }
 }
 
+/// Lyrics source picked by the user (`[lyrics] provider` in the config).
+/// LRCLIB then YouTube Music are asked when it has nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Provider {
+    #[default]
+    #[serde(rename = "betterlyrics")]
+    BetterLyrics,
+    #[serde(rename = "betterlyrics-qq")]
+    BetterLyricsQq,
+    #[serde(rename = "lrclib")]
+    Lrclib,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 3] = [
+        Provider::BetterLyrics,
+        Provider::BetterLyricsQq,
+        Provider::Lrclib,
+    ];
+
+    pub fn source(self) -> Source {
+        match self {
+            Provider::BetterLyrics => Source::BetterLyrics,
+            Provider::BetterLyricsQq => Source::BetterLyricsQq,
+            Provider::Lrclib => Source::Lrclib,
+        }
+    }
+
+    /// The next provider, to cycle through them.
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|x| *x == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    /// Sources asked in order until one has the lyrics.
+    pub fn chain(self) -> Vec<Source> {
+        let mut chain = vec![self.source()];
+        for fallback in [Source::Lrclib, Source::YoutubeMusic] {
+            if !chain.contains(&fallback) {
+                chain.push(fallback);
+            }
+        }
+        chain
+    }
+}
+
 /// Answer of one lyrics source.
 #[derive(Debug)]
 pub enum Fetched {
@@ -302,6 +348,20 @@ fn write_json(path: &Path, lyrics: &Lyrics) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_chain_and_cycle() {
+        use Source::*;
+        assert_eq!(
+            Provider::BetterLyrics.chain(),
+            [BetterLyrics, Lrclib, YoutubeMusic]
+        );
+        assert_eq!(Provider::Lrclib.chain(), [Lrclib, YoutubeMusic]);
+        assert_eq!(Provider::BetterLyrics.next(), Provider::BetterLyricsQq);
+        assert_eq!(Provider::Lrclib.next(), Provider::BetterLyrics);
+        let parsed: Provider = serde_json::from_str("\"betterlyrics-qq\"").unwrap();
+        assert_eq!(parsed, Provider::BetterLyricsQq);
+    }
 
     #[test]
     fn plain_lyrics() {
