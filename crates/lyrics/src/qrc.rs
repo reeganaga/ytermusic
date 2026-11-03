@@ -5,8 +5,6 @@
 //! times in milliseconds. The first lines are usually credits
 //! (`Title - Artist`, `Lyrics by：...`) and are dropped.
 
-use quick_xml::{events::Event, Reader};
-
 use crate::{lrc, Line, Lyrics, Source, Word};
 
 /// QQ's text for songs without lyrics.
@@ -31,10 +29,7 @@ const CREDITS: &[&str] = &[
 
 /// Parses a QRC document (or plain LRC text, which QQ sometimes returns).
 pub fn parse(document: &str, source: Source) -> Result<Lyrics, String> {
-    let content = match lyric_content(document)? {
-        Some(content) => content,
-        None => document.to_owned(),
-    };
+    let content = lyric_content(document).unwrap_or_else(|| document.to_owned());
     let mut lines: Vec<Line> = content.lines().filter_map(parse_line).collect();
     if lines.is_empty() {
         // Not QRC: maybe LRC
@@ -59,29 +54,21 @@ pub fn parse(document: &str, source: Source) -> Result<Lyrics, String> {
     Ok(Lyrics::new(source, lines))
 }
 
-/// The `LyricContent` attribute, `None` when the document is not XML.
-fn lyric_content(document: &str) -> Result<Option<String>, String> {
-    if !document.trim_start().starts_with('<') {
-        return Ok(None);
-    }
-    let mut reader = Reader::from_str(document);
-    loop {
-        match reader.read_event().map_err(|e| format!("QRC: {e}"))? {
-            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref().starts_with(b"Lyric_") => {
-                let content = e
-                    .attributes()
-                    .flatten()
-                    .find(|x| x.key.as_ref() == b"LyricContent")
-                    .and_then(|x| x.unescape_value().ok())
-                    .map(|x| x.into_owned());
-                if content.is_some() {
-                    return Ok(content);
-                }
-            }
-            Event::Eof => return Ok(None),
-            _ => {}
-        }
-    }
+/// The `LyricContent` attribute, `None` when the document is not QRC.
+///
+/// Read by hand: QQ leaves raw quotes inside the attribute
+/// (`Juan "Saucy" Peña`), which XML parsers stop at. The value runs to the
+/// last quote closing the element.
+fn lyric_content(document: &str) -> Option<String> {
+    const OPEN: &str = "LyricContent=\"";
+    let start = document.find(OPEN)? + OPEN.len();
+    let rest = &document[start..];
+    let end = rest.rfind("\"/>").or_else(|| rest.rfind("\">"))?;
+    let raw = &rest[..end];
+    Some(match quick_xml::escape::unescape(raw) {
+        Ok(text) => text.into_owned(),
+        Err(_) => raw.to_owned(),
+    })
 }
 
 /// `[351,1039]I (351,397)love(748,642)` -> a line at 351ms with two words.
@@ -159,6 +146,7 @@ mod tests {
 [52,205]Lyrics (52,10)by：(62,10)Someone(72,10)
 [351,1039]I (351,397)love(748,642)
 [3323,800]Tryin&apos; (3323,246)(so (3569,300)hard)(3869,254)
+[5000,500]Juan "Saucy"(5000,500)
 "/>
 </LyricInfo>
 </QrcInfos>"#;
@@ -166,7 +154,8 @@ mod tests {
     #[test]
     fn parses_words_and_drops_credits() {
         let lyrics = parse(DOC, Source::BetterLyricsQq).unwrap();
-        assert_eq!(lyrics.lines.len(), 2);
+        assert_eq!(lyrics.lines.len(), 3);
+        assert_eq!(lyrics.lines[2].text, "Juan \"Saucy\"");
         let line = &lyrics.lines[0];
         assert_eq!(line.time_ms, Some(351));
         assert_eq!(line.text, "I love");
