@@ -1,11 +1,13 @@
 //! Lyrics panel: takes the place of the queue on the player screen (`y`).
 //! Synced lyrics follow the song with the active line kept near the top third;
-//! the romanization and translation of each line are shown under it.
+//! the romanization and translation of each line are shown under it. With
+//! word timings (Better Lyrics) the active line fills word by word.
 //!
 //! Lyrics are only fetched while this panel is visible: `render` notices the
 //! playing song changed and starts a fetch.
 
 use std::{
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -13,7 +15,7 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use flume::{Receiver, Sender};
 use log::{error, info};
-use lyrics::{lrc, Cache, Fetched, HttpClient, Lyrics, Source, Track, Translation};
+use lyrics::{lrc, Cache, Fetched, HttpClient, Lyrics, Source, Track, Translation, Word};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -82,6 +84,10 @@ pub struct LyricsView {
     last_active: Option<usize>,
     /// Highlight fade in progress: line losing the highlight, start
     fade: Option<(Option<usize>, Instant)>,
+    /// Fill the active line word by word (`word_sync = true`)
+    word_sync: bool,
+    /// When the next word (or line) starts: the panel is redrawn then
+    next_change: Option<Instant>,
     sender: Sender<Update>,
     receiver: Receiver<Update>,
     client: HttpClient,
@@ -109,6 +115,8 @@ impl LyricsView {
             scroll_anim: None,
             last_active: None,
             fade: None,
+            word_sync: CONFIG.lyrics.word_sync,
+            next_change: None,
             sender,
             receiver,
             client: lyrics::http_client(),
@@ -301,7 +309,12 @@ impl LyricsView {
         };
         for (i, line) in lyrics.lines.iter().enumerate() {
             if spaced && i > 0 {
-                layout.rows.push((String::new(), RowKind::Blank, i));
+                layout.rows.push(Row {
+                    text: String::new(),
+                    kind: RowKind::Blank,
+                    line: i,
+                    words: Vec::new(),
+                });
             }
             layout.starts.push(layout.rows.len());
             let original = if line.text.is_empty() {
@@ -309,12 +322,18 @@ impl LyricsView {
             } else {
                 to_bidi_string(&line.text)
             };
-            layout.push_wrapped(&original, RowKind::Main, i);
+            // Reordered right-to-left text no longer matches the word timings
+            let words: &[Word] = if self.word_sync && original == line.text {
+                &line.words
+            } else {
+                &[]
+            };
+            layout.push_wrapped(&original, RowKind::Main, i, words);
             if let Some(romanized) = extra(romanized, i) {
-                layout.push_wrapped(romanized, RowKind::Romanized, i);
+                layout.push_wrapped(romanized, RowKind::Romanized, i, &[]);
             }
             if let Some(translated) = extra(translated, i) {
-                layout.push_wrapped(translated, RowKind::Translated, i);
+                layout.push_wrapped(translated, RowKind::Translated, i, &[]);
             }
         }
         layout
@@ -353,6 +372,31 @@ impl LyricsView {
             }
             None => 1.0,
         }
+    }
+
+    /// When the karaoke fill next changes: the next word of the active line,
+    /// or the next line. `None` when paused or without word timings.
+    fn next_change(
+        &self,
+        lyrics: &Lyrics,
+        active: Option<usize>,
+        position: u64,
+        ctx: &Ctx,
+    ) -> Option<Instant> {
+        if !self.word_sync || ctx.player.sink.is_paused() || !synced_words(lyrics) {
+            return None;
+        }
+        let words = active.and_then(|a| lyrics.lines.get(a)).map(|x| &x.words);
+        let next_word = words
+            .into_iter()
+            .flatten()
+            .map(|x| x.start_ms)
+            .filter(|&start| start > position)
+            .min();
+        let next_line = lyrics.times().into_iter().find(|&start| start > position);
+        let next = next_word.into_iter().chain(next_line).min()?;
+        // A few ms late so the word has started when redrawn
+        Some(Instant::now() + Duration::from_millis(next - position + 5))
     }
 
     /// Starts a fade when the active line changes and ends finished ones.
@@ -436,6 +480,11 @@ fn lerp(from: Color, to: Color, t: f32) -> Color {
     }
 }
 
+/// Whether some line has word timings.
+fn synced_words(lyrics: &Lyrics) -> bool {
+    lyrics.lines.iter().any(|x| !x.words.is_empty())
+}
+
 /// Line `i` of an optional romanization / translation list.
 fn extra(list: Option<&Vec<Option<String>>>, i: usize) -> Option<&str> {
     list.and_then(|x| x.get(i)).and_then(|x| x.as_deref())
@@ -449,59 +498,106 @@ enum RowKind {
     Translated,
 }
 
+struct Row {
+    text: String,
+    kind: RowKind,
+    /// Lyric line index
+    line: usize,
+    /// Timed words of the row (karaoke): byte range in `text`, start time
+    words: Vec<(Range<usize>, u64)>,
+}
+
 #[derive(Default)]
 struct Layout {
     width: usize,
-    /// Text, kind and lyric line index of every row
-    rows: Vec<(String, RowKind, usize)>,
+    rows: Vec<Row>,
     /// First row of each lyric line
     starts: Vec<usize>,
 }
 
 impl Layout {
-    fn push_wrapped(&mut self, text: &str, kind: RowKind, line: usize) {
-        for part in wrap(text, self.width) {
-            self.rows.push((part, kind, line));
+    /// Wraps `text` into rows. `words` (whose texts put together are `text`)
+    /// are split along the rows for the karaoke fill.
+    fn push_wrapped(&mut self, text: &str, kind: RowKind, line: usize, words: &[Word]) {
+        let mut spans = Vec::with_capacity(words.len());
+        let mut end = 0;
+        for word in words {
+            spans.push((end..end + word.text.len(), word.start_ms));
+            end += word.text.len();
+        }
+        if end != text.len() {
+            spans.clear();
+        }
+        for range in wrap_ranges(text, self.width) {
+            let words = spans
+                .iter()
+                .filter_map(|(word, time)| {
+                    let start = word.start.max(range.start);
+                    let end = word.end.min(range.end);
+                    (start < end).then(|| (start - range.start..end - range.start, *time))
+                })
+                .collect();
+            self.rows.push(Row {
+                text: text[range].to_owned(),
+                kind,
+                line,
+                words,
+            });
         }
     }
 }
 
 /// Splits the text into rows of at most `width` columns, breaking at spaces
-/// when possible and anywhere for scripts without spaces (CJK).
-fn wrap(text: &str, width: usize) -> Vec<String> {
+/// when possible and anywhere for scripts without spaces (CJK). Rows are
+/// byte ranges of `text` without their leading and trailing spaces.
+fn wrap_ranges(text: &str, width: usize) -> Vec<Range<usize>> {
     let width = width.max(1);
     let mut rows = Vec::new();
-    let mut row = String::new();
+    let mut start: Option<usize> = None;
+    let mut end = 0;
     let mut row_width = 0;
+    let mut pos = 0;
     for word in text.split_inclusive(' ') {
         let word_width = word.trim_end().width();
-        if row_width + word_width > width && !row.is_empty() {
-            rows.push(row.trim_end().to_owned());
-            row.clear();
-            row_width = 0;
+        if row_width + word_width > width {
+            if let Some(start) = start.take() {
+                rows.push(start..end);
+                row_width = 0;
+            }
         }
         if word_width > width {
             // Word longer than the row: break it by characters
-            for c in word.chars() {
+            for (i, c) in word.char_indices() {
                 let w = c.width().unwrap_or(0);
-                if row_width + w > width && !row.is_empty() {
-                    rows.push(row.trim_end().to_owned());
-                    row.clear();
-                    row_width = 0;
+                if row_width + w > width {
+                    if let Some(start) = start.take() {
+                        rows.push(start..end);
+                        row_width = 0;
+                    }
                 }
-                if row.is_empty() && c == ' ' {
+                if start.is_none() && c == ' ' {
                     continue;
                 }
-                row.push(c);
+                start.get_or_insert(pos + i);
                 row_width += w;
+                if c != ' ' {
+                    end = pos + i + c.len_utf8();
+                }
             }
-        } else {
-            row.push_str(word);
+        } else if !word.trim().is_empty() || start.is_some() {
+            start.get_or_insert(pos);
             row_width += word.width();
+            let trimmed = word.trim_end().len();
+            if trimmed > 0 {
+                end = pos + trimmed;
+            }
         }
+        pos += word.len();
     }
-    if !row.trim().is_empty() || rows.is_empty() {
-        rows.push(row.trim_end().to_owned());
+    match start {
+        Some(start) if start < end => rows.push(start..end),
+        _ if rows.is_empty() => rows.push(0..0),
+        _ => {}
     }
     rows
 }
@@ -536,6 +632,7 @@ impl Screen for LyricsView {
 
     fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &Ctx) {
         self.sync(ctx.player);
+        self.next_change = None;
         let inner = panel(buf, area, &self.title(), ctx.focused);
         let content = pad(inner, if ctx.narrow { 1 } else { 2 }, 1);
         if content.height == 0 || content.width == 0 {
@@ -560,12 +657,12 @@ impl Screen for LyricsView {
         };
 
         let synced = lyrics.synced();
+        let position =
+            (ctx.player.sink.elapsed().as_millis() as i64 + self.offset_ms).max(0) as u64;
         let active = synced
-            .then(|| {
-                let position = ctx.player.sink.elapsed().as_millis() as i64 + self.offset_ms;
-                lrc::active_line(&lyrics.times(), position.max(0) as u64)
-            })
+            .then(|| lrc::active_line(&lyrics.times(), position))
             .flatten();
+        let next_change = self.next_change(lyrics, active, position, ctx);
         let width = content.width as usize;
         if self.layout.as_ref().is_none_or(|l| l.width != width) {
             self.layout = Some(self.build_layout(lyrics, width));
@@ -594,20 +691,47 @@ impl Screen for LyricsView {
         self.update_fade(active);
         self.top = (self.scroll.round() as usize).min(self.max_top);
 
-        for (i, (line, kind, index)) in layout.rows.iter().skip(self.top).take(height).enumerate() {
-            buf.set_stringn(
-                content.x,
-                content.y + i as u16,
-                line,
-                width,
-                self.row_style(*kind, *index, active, synced),
-            );
+        for (i, row) in layout.rows.iter().skip(self.top).take(height).enumerate() {
+            let y = content.y + i as u16;
+            let style = self.row_style(row.kind, row.line, active, synced);
+            if active != Some(row.line) || row.words.is_empty() {
+                buf.set_stringn(content.x, y, &row.text, width, style);
+                continue;
+            }
+            // Karaoke: sung words in the accent color
+            let t = theme();
+            let sung = style.fg(t.accent);
+            let unsung = style.fg(t.text);
+            let mut x = content.x;
+            let mut cursor = 0;
+            let right = content.x + content.width;
+            let mut draw = |x: &mut u16, text: &str, style: Style| {
+                let room = right.saturating_sub(*x) as usize;
+                *x = buf.set_stringn(*x, y, text, room, style).0;
+            };
+            for (range, start) in &row.words {
+                if range.start > cursor {
+                    draw(&mut x, &row.text[cursor..range.start], unsung);
+                }
+                let style = if *start <= position { sung } else { unsung };
+                draw(&mut x, &row.text[range.clone()], style);
+                cursor = range.end;
+            }
+            if cursor < row.text.len() {
+                draw(&mut x, &row.text[cursor..], unsung);
+            }
         }
+        self.next_change = next_change;
         self.layout = Some(layout);
     }
 
     fn animating(&self) -> bool {
         self.scroll_anim.is_some() || self.fade.is_some()
+    }
+
+    fn redraw_in(&self) -> Option<Duration> {
+        self.next_change
+            .map(|at| at.saturating_duration_since(Instant::now()))
     }
 
     fn hints(&self, _: &Ctx) -> Vec<Hint> {
@@ -629,7 +753,8 @@ impl Screen for LyricsView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ease_out_cubic, lerp, wrap};
+    use super::{ease_out_cubic, lerp, wrap_ranges, Layout, RowKind};
+    use lyrics::Word;
     use ratatui::style::Color;
 
     #[test]
@@ -645,6 +770,35 @@ mod tests {
         assert_eq!(lerp(Color::Red, Color::Blue, 0.6), Color::Blue);
     }
 
+    fn wrap(text: &str, width: usize) -> Vec<&str> {
+        wrap_ranges(text, width)
+            .into_iter()
+            .map(|x| &text[x])
+            .collect()
+    }
+
+    #[test]
+    fn splits_words_along_rows() {
+        let words: Vec<Word> = [("one ", 1), ("two ", 2), ("th", 3), ("ree", 4)]
+            .iter()
+            .map(|(text, start)| Word {
+                start_ms: *start,
+                end_ms: start + 1,
+                text: text.to_string(),
+            })
+            .collect();
+        let mut layout = Layout {
+            width: 7,
+            ..Default::default()
+        };
+        layout.push_wrapped("one two three", RowKind::Main, 0, &words);
+        assert_eq!(layout.rows.len(), 2);
+        assert_eq!(layout.rows[0].text, "one two");
+        assert_eq!(layout.rows[0].words, vec![(0..4, 1), (4..7, 2)]);
+        assert_eq!(layout.rows[1].text, "three");
+        assert_eq!(layout.rows[1].words, vec![(0..2, 3), (2..5, 4)]);
+    }
+
     #[test]
     fn wraps_words_and_cjk() {
         assert_eq!(wrap("one two three", 7), vec!["one two", "three"]);
@@ -654,5 +808,6 @@ mod tests {
         );
         assert_eq!(wrap("abcdefgh ij", 4), vec!["abcd", "efgh", "ij"]);
         assert_eq!(wrap("", 4), vec![""]);
+        assert_eq!(wrap("  a  b ", 10), vec!["a  b"]);
     }
 }

@@ -71,6 +71,11 @@ pub trait Screen {
     fn animating(&self) -> bool {
         false
     }
+    /// Time until the screen changes on its own (next karaoke word), when
+    /// sooner than the normal tick.
+    fn redraw_in(&self) -> Option<Duration> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -527,10 +532,14 @@ impl Manager {
                 self.render(f);
             })?;
 
-            let frame = if self.with_screen(|s, _| s.animating()) {
+            let (animating, redraw_in) = self.with_screen(|s, _| (s.animating(), s.redraw_in()));
+            let frame = if animating {
                 ANIMATION_FRAME
             } else {
-                tick_rate
+                // Redraw right when a karaoke word starts
+                redraw_in
+                    .map(|wait| tick_rate.min(last_tick.elapsed() + wait))
+                    .unwrap_or(tick_rate)
             };
             let timeout = frame
                 .checked_sub(last_tick.elapsed())

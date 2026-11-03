@@ -267,6 +267,10 @@ pub struct LyricsConfig {
     /// Redraws at ~30 fps while animating; turn off on slow terminals / SSH.
     #[serde(default = "default_true")]
     pub animate: bool,
+    /// Fill the active line word by word when the lyrics have word timings
+    /// (Better Lyrics). Redraws when each word starts.
+    #[serde(default = "default_true")]
+    pub word_sync: bool,
 }
 
 impl Default for LyricsConfig {
@@ -276,6 +280,7 @@ impl Default for LyricsConfig {
             translate: true,
             translate_to: default_translate_to(),
             animate: true,
+            word_sync: true,
         }
     }
 }
