@@ -34,7 +34,7 @@ YTerMusic is a TUI based Youtube Music Player that aims to be as fast and simple
 	- [x] A download limit to stop downloading after the queue is full
 	- [x] Mouse support
 	- [x] Search
-	- [x] Synced lyrics with translation and romanization
+	- [x] Synced lyrics (word by word when available) with translation and romanization
 	- [x] Custom theming (You can use hex! #05313d = ![05313d](./assets/hex/05313d.png "#05313d") )
 
 ## Install
@@ -113,9 +113,16 @@ highlighted. <kbd>j</kbd> / <kbd>k</kbd> scroll by hand (auto-scroll resumes aft
 seconds), <kbd>c</kbd> jumps back to the current line, <kbd>R</kbd> / <kbd>T</kbd> show or
 hide the romanization (romaji, pinyin, romaja...) and the translation under each line, and
 <kbd>[</kbd> / <kbd>]</kbd> shift the timing by 0.5 seconds when the lyrics are early or
-late. Lyrics come from [LRCLIB](https://lrclib.net) (synced), with the YouTube Music lyrics as
-a fallback (unsynced, shown with "unsynced" in the panel title). They are only fetched while
-the panel is open and are cached in the cache folder.
+late, and <kbd>P</kbd> switches the lyrics provider (saved to the config) and asks it for the
+current song.
+
+Lyrics come from [Better Lyrics](https://better-lyrics.boidu.dev) first: word-synced lyrics
+(the current line fills word by word, duets put the second singer on the right). Without an
+API key Better Lyrics only has the songs people already played with its browser extension,
+so when it has nothing [LRCLIB](https://lrclib.net) (line-synced) is asked, then YouTube
+Music (unsynced, shown with "unsynced" in the panel title). The panel title shows where the
+lyrics come from. They are only fetched while the panel is open and are cached in the cache
+folder, per provider.
 
 Library: arrows to move between playlists, <kbd>Enter</kbd> to open one.
 
@@ -152,7 +159,15 @@ romanize = true      # show romanization under non-latin lyrics (R toggles and s
 translate = true     # show the translation under each line (T toggles and saves it)
 translate_to = "en"  # language of the translation: "en", "id", "fr", "es"...
 animate = true       # slide between lines and fade the highlight (false: jump, less redraws)
+word_sync = true     # fill the current line word by word when the lyrics have word timings
+provider = "betterlyrics"  # "betterlyrics", "betterlyrics-qq" (QQ Music) or "lrclib" (P cycles and saves it)
+betterlyrics_api_key = ""  # optional, sent as X-API-Key: also finds songs not in Better Lyrics' cache
 ```
+
+Better Lyrics is not handing out API keys to new users at the moment, so most people leave
+`betterlyrics_api_key` empty. A song Better Lyrics does not have is not asked again for 3
+days (it gets more songs over time); <kbd>P</kbd> asks again right away. When Better Lyrics
+gives its own romanization or translation, it is used instead of Google Translate.
 
 Translation and romanization use Google Translate's public web endpoint (the one used by
 browser extensions). It needs no API key, but it is unofficial: it may be rate limited or
