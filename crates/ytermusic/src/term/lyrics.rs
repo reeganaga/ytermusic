@@ -890,7 +890,7 @@ impl Screen for LyricsView {
             hint("P", "provider", "prov"),
         ]);
         if self.synced() {
-            hints.push(hint("[/]", "offset ±0.5s", "ofs"));
+            hints.push(hint("[ ]", "offset ±0.5s", "ofs"));
         }
         hints.extend([
             hint("space", "play/pause", "play"),
