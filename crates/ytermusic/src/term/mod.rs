@@ -143,6 +143,9 @@ pub struct Manager {
     notice: Option<(String, Instant)>,
     #[cfg(feature = "thumbnails")]
     thumbnail: thumbnail::Thumbnail,
+    /// Socket of `--lyrics-view`
+    #[cfg(unix)]
+    pip: Option<crate::pip::server::PipServer>,
 }
 
 impl Manager {
@@ -166,6 +169,12 @@ impl Manager {
             notice: None,
             #[cfg(feature = "thumbnails")]
             thumbnail: thumbnail::Thumbnail::new(),
+            #[cfg(unix)]
+            pip: crate::consts::CONFIG
+                .lyrics
+                .socket
+                .then(crate::pip::server::PipServer::start)
+                .flatten(),
             player,
         }
     }
@@ -526,6 +535,10 @@ impl Manager {
                 if self.handle_manager_message(e) {
                     break 'a;
                 }
+            }
+            #[cfg(unix)]
+            if let Some(pip) = self.pip.as_mut() {
+                pip.tick(&mut self.player, &mut self.lyrics);
             }
             terminal.draw(|f| {
                 self.player.update();

@@ -26,6 +26,8 @@ mod config;
 mod consts;
 mod database;
 mod errors;
+#[cfg(unix)]
+mod pip;
 mod shutdown;
 mod structures;
 mod systems;
@@ -67,6 +69,15 @@ fn main() {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!("{}", INTRODUCTION);
+                return;
+            }
+            "--lyrics-view" => {
+                #[cfg(unix)]
+                if let Err(e) = pip::view::run() {
+                    println!("[ERROR] {e}");
+                }
+                #[cfg(not(unix))]
+                println!("--lyrics-view needs a unix socket: Linux and macOS only");
                 return;
             }
             "--files" => {
@@ -115,6 +126,7 @@ fn main() {
                 println!(" - --files: Show the location of the ytermusic files");
                 println!(" - --clear-cache: Erase all the files in cache");
                 println!(" - --fix-db: Fix the database");
+                println!(" - --lyrics-view: Lyrics, cover and controls of the running player");
                 return;
             }
         }

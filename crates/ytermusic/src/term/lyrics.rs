@@ -24,6 +24,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
 };
+use serde::{Deserialize, Serialize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use ytpapi2::{YoutubeMusicInstance, YoutubeMusicVideoRef};
 
@@ -51,7 +52,8 @@ const FADE_DURATION: Duration = Duration::from_millis(300);
 /// none: lyrics are looked up without it after that.
 const DURATION_WAIT: Duration = Duration::from_secs(10);
 
-enum State {
+#[derive(Serialize, Deserialize)]
+pub enum State {
     /// Nothing playing
     Idle,
     Loading,
@@ -110,6 +112,9 @@ pub struct LyricsView {
     /// Waiting since then for the player to know the duration (lyrics
     /// sources match songs on it)
     duration_wait: Option<Instant>,
+    /// Bumped whenever `state` may have changed, so the `--lyrics-view`
+    /// socket knows when to resend the lyrics
+    revision: u64,
     sender: Sender<Update>,
     receiver: Receiver<Update>,
     client: HttpClient,
@@ -146,6 +151,7 @@ impl LyricsView {
             refetch: false,
             duration: None,
             duration_wait: None,
+            revision: 0,
             sender,
             receiver,
             client: lyrics::http_client(),
@@ -158,8 +164,46 @@ impl LyricsView {
         &CONFIG.lyrics.translate_to
     }
 
+    /// Lyrics state, offset and toggles shared with `--lyrics-view`.
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn options(&self) -> (i64, bool, bool) {
+        (self.offset_ms, self.romanize, self.translate)
+    }
+
+    /// `--lyrics-view`: shows lyrics received from the player instead of
+    /// fetching them.
+    pub fn set_remote(&mut self, state: State, video_id: Option<String>) {
+        if video_id != self.video_id {
+            self.video_id = video_id;
+            self.manual = None;
+            self.scroll = 0.0;
+            self.scroll_anim = None;
+            self.last_active = None;
+            self.fade = None;
+        }
+        self.state = state;
+        self.layout = None;
+    }
+
+    /// `--lyrics-view`: offset and toggles of the player.
+    pub fn set_remote_options(&mut self, offset_ms: i64, romanize: bool, translate: bool) {
+        if (romanize, translate) != (self.romanize, self.translate) {
+            self.layout = None;
+        }
+        self.offset_ms = offset_ms;
+        self.romanize = romanize;
+        self.translate = translate;
+    }
+
     /// Applies finished fetches and starts the ones the current song needs.
-    fn sync(&mut self, player: &PlayerState) {
+    pub fn sync(&mut self, player: &PlayerState) {
         while let Ok(update) = self.receiver.try_recv() {
             self.apply(update);
         }
@@ -170,6 +214,7 @@ impl LyricsView {
             }
         }
         if current.map(|x| &x.video_id) != self.video_id.as_ref() {
+            self.revision += 1;
             self.video_id = current.map(|x| x.video_id.clone());
             self.offset_ms = 0;
             self.manual = None;
@@ -225,6 +270,7 @@ impl LyricsView {
 
     fn apply(&mut self, update: Update) {
         self.layout = None;
+        self.revision += 1;
         let current = |id: &String, generation: u64| {
             Some(id) == self.video_id.as_ref() && generation == self.generation
         };
@@ -509,9 +555,9 @@ impl LyricsView {
         lyrics: &Lyrics,
         active: Option<usize>,
         position: u64,
-        ctx: &Ctx,
+        paused: bool,
     ) -> Option<Instant> {
-        if !self.word_sync || ctx.player.sink.is_paused() || !synced_words(lyrics) {
+        if !self.word_sync || paused || !synced_words(lyrics) {
             return None;
         }
         let line = active.and_then(|a| lyrics.lines.get(a));
@@ -769,9 +815,30 @@ impl Screen for LyricsView {
 
     fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &Ctx) {
         self.sync(ctx.player);
-        self.next_change = None;
         let inner = panel(buf, area, &self.title(), ctx.focused);
         let content = pad(inner, if ctx.narrow { 1 } else { 2 }, 1);
+        let elapsed = ctx.player.sink.elapsed().as_millis() as u64;
+        self.draw(buf, content, elapsed, ctx.player.sink.is_paused());
+    }
+
+    fn animating(&self) -> bool {
+        LyricsView::animating(self)
+    }
+
+    fn redraw_in(&self) -> Option<Duration> {
+        LyricsView::redraw_in(self)
+    }
+
+    fn hints(&self, _: &Ctx) -> Vec<Hint> {
+        self.hints_list()
+    }
+}
+
+impl LyricsView {
+    /// Draws the lyrics in `content` for a song at `elapsed_ms` (before the
+    /// offset), paused or not.
+    pub fn draw(&mut self, buf: &mut Buffer, content: Rect, elapsed_ms: u64, paused: bool) {
+        self.next_change = None;
         if content.height == 0 || content.width == 0 {
             return;
         }
@@ -794,12 +861,11 @@ impl Screen for LyricsView {
         };
 
         let synced = lyrics.synced();
-        let position =
-            (ctx.player.sink.elapsed().as_millis() as i64 + self.offset_ms).max(0) as u64;
+        let position = (elapsed_ms as i64 + self.offset_ms).max(0) as u64;
         let active = synced
             .then(|| lrc::active_line(&lyrics.times(), position))
             .flatten();
-        let next_change = self.next_change(lyrics, active, position, ctx);
+        let next_change = self.next_change(lyrics, active, position, paused);
         let width = content.width as usize;
         if self.layout.as_ref().is_none_or(|l| l.width != width) {
             self.layout = Some(self.build_layout(lyrics, width));
@@ -870,16 +936,21 @@ impl Screen for LyricsView {
         self.layout = Some(layout);
     }
 
-    fn animating(&self) -> bool {
+    pub fn animating(&self) -> bool {
         self.scroll_anim.is_some() || self.fade.is_some()
     }
 
-    fn redraw_in(&self) -> Option<Duration> {
+    pub fn redraw_in(&self) -> Option<Duration> {
         self.next_change
             .map(|at| at.saturating_duration_since(Instant::now()))
     }
 
-    fn hints(&self, _: &Ctx) -> Vec<Hint> {
+    /// Scrolls by hand (mouse wheel).
+    pub fn scroll_by(&mut self, delta: isize) {
+        self.scroll(delta);
+    }
+
+    fn hints_list(&self) -> Vec<Hint> {
         let mut hints = vec![hint("y", "queue", "queue"), hint("j/k", "scroll", "scrl")];
         if self.synced() {
             hints.push(hint("c", "center", "ctr"));

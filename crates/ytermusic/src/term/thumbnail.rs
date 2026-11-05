@@ -4,7 +4,7 @@
 use flume::{Receiver, Sender};
 use image::DynamicImage;
 use log::{error, info};
-use ratatui::{widgets::Clear, Frame};
+use ratatui::{layout::Rect, widgets::Clear, Frame};
 use ratatui_image::{
     picker::{Picker, ProtocolType},
     protocol::StatefulProtocol,
@@ -17,8 +17,14 @@ use super::chrome::FrameLayout;
 
 /// Side of the square image kept in memory, in pixels.
 const IMAGE_SIZE: u32 = 120;
+/// Same for `--lyrics-view`, where the cover is much bigger (YouTube's
+/// thumbnail is 180 pixels square at most, so it only grows up to that).
+const LARGE_IMAGE_SIZE: u32 = 256;
 
 pub struct Thumbnail {
+    /// Side of the image kept, and whether it is scaled up to the area
+    image_size: u32,
+    scale_up: bool,
     picker: Option<Picker>,
     video_id: Option<String>,
     protocol: Option<StatefulProtocol>,
@@ -28,8 +34,20 @@ pub struct Thumbnail {
 
 impl Thumbnail {
     pub fn new() -> Self {
+        Self::sized(IMAGE_SIZE, false)
+    }
+
+    /// A big cover filling its whole area (`--lyrics-view`).
+    #[cfg(unix)]
+    pub fn large() -> Self {
+        Self::sized(LARGE_IMAGE_SIZE, true)
+    }
+
+    fn sized(image_size: u32, scale_up: bool) -> Self {
         let (sender, receiver) = flume::unbounded();
         Self {
+            image_size,
+            scale_up,
             picker: None,
             video_id: None,
             protocol: None,
@@ -59,8 +77,16 @@ impl Thumbnail {
         self.picker.is_some()
     }
 
+    /// Size of a terminal cell in pixels, to draw a square cover.
+    #[cfg(unix)]
+    pub fn font_size(&self) -> Option<(u16, u16)> {
+        let size = self.picker.as_ref()?.font_size();
+        Some((size.width, size.height))
+    }
+
     fn fetch(&self, video_id: String) {
         let sender = self.sender.clone();
+        let image_size = self.image_size;
         run_service(async move {
             let url = format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg");
             let bytes = match reqwest::get(&url).await {
@@ -87,16 +113,21 @@ impl Thumbnail {
             let y = (image.height() - side) / 2;
             let square = image
                 .crop_imm(x, y, side, side)
-                .thumbnail(IMAGE_SIZE, IMAGE_SIZE);
+                .thumbnail(image_size, image_size);
             let _ = sender.send((video_id, square));
         });
     }
 
     pub fn render(&mut self, frame: &mut Frame, layout: &FrameLayout, player: &PlayerState) {
+        let current = player.current().map(|x| x.video_id.clone());
+        self.draw(frame, layout.art, current);
+    }
+
+    /// Draws the cover of `video_id` in `area`, fetching it when the song changed.
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, current: Option<String>) {
         let Some(picker) = &self.picker else {
             return;
         };
-        let current = player.current().map(|x| x.video_id.clone());
         if current != self.video_id {
             self.video_id = current.clone();
             self.protocol = None;
@@ -110,15 +141,16 @@ impl Thumbnail {
             }
         }
         if let Some(protocol) = self.protocol.as_mut() {
-            if layout.art.width == 0 || layout.art.height == 0 {
+            if area.width == 0 || area.height == 0 {
                 return;
             }
-            frame.render_widget(Clear, layout.art);
-            frame.render_stateful_widget(
-                StatefulImage::default().resize(Resize::Fit(None)),
-                layout.art,
-                protocol,
-            );
+            frame.render_widget(Clear, area);
+            let resize = if self.scale_up {
+                Resize::Scale(None)
+            } else {
+                Resize::Fit(None)
+            };
+            frame.render_stateful_widget(StatefulImage::default().resize(resize), area, protocol);
         }
     }
 }

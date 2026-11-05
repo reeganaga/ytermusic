@@ -124,6 +124,17 @@ Music (unsynced, shown with "unsynced" in the panel title). The panel title show
 lyrics come from. They are only fetched while the panel is open and are cached in the cache
 folder, per provider.
 
+Lyrics view (Linux and macOS): run `ytermusic --lyrics-view` in a second terminal (a small
+window, a tmux pane...) while the player runs. It shows the cover (kitty / sixel / iTerm2
+terminals, with the `thumbnails` feature), the title, the artist and album, and the synced
+lyrics with romanization and translation, and has ◀◀ ⏯ ▶▶ buttons you click. Under 60 columns
+or without image support the cover is hidden and the lyrics take the whole width. The player
+sends it the lyrics over a unix socket (`$XDG_RUNTIME_DIR/ytermusic.sock`, else the cache
+folder), so they are fetched once and nothing else needs setting up. `socket = false` in the
+`[lyrics]` config section turns the socket off. To open it from a key binding or a window
+manager rule, start a terminal on it, for example `kitty --class ytermusic-lyrics -e ytermusic --lyrics-view`
+(then give that class an "always on top" rule in your window manager).
+
 Library: arrows to move between playlists, <kbd>Enter</kbd> to open one.
 
 Playlist viewer: <kbd>Enter</kbd> plays from the selected song, <kbd>p</kbd> plays

@@ -37,6 +37,7 @@ Options:
         --files             Show the location of the ytermusic files
         --fix-db            Fix the database in cache
         --clear-cache       Erase all the files in cache
+        --lyrics-view       Show the lyrics of the running player in this terminal
 
 Shortcuts:
         Use your mouse to click in lists if your terminal has mouse support

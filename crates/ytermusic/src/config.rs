@@ -282,6 +282,11 @@ pub struct LyricsConfig {
     /// new users at the moment.
     #[serde(default)]
     pub betterlyrics_api_key: String,
+    /// Listen on a unix socket so `ytermusic --lyrics-view` (a second
+    /// terminal showing the lyrics, cover and play controls) can connect.
+    /// Idle when nothing is connected. Linux and macOS only.
+    #[serde(default = "default_true")]
+    pub socket: bool,
 }
 
 impl Default for LyricsConfig {
@@ -294,6 +299,7 @@ impl Default for LyricsConfig {
             word_sync: true,
             provider: lyrics::Provider::default(),
             betterlyrics_api_key: String::new(),
+            socket: true,
         }
     }
 }
