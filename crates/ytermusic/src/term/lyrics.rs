@@ -61,6 +61,16 @@ pub enum State {
     NotFound,
 }
 
+/// Lyrics provider as `--lyrics-view` shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ProviderStatus {
+    pub provider: Source,
+    /// Being asked after `P`
+    pub switching: Option<Source>,
+    /// Picked with `P` and had nothing for this song
+    pub missing_on: Option<Source>,
+}
+
 enum Update {
     /// Lyrics of a video for a fetch (generation), `None` when no source has them
     Lyrics(String, u64, Option<Lyrics>),
@@ -368,8 +378,24 @@ impl LyricsView {
         });
     }
 
+    /// Picked provider and whether it is being asked or had nothing, shared
+    /// with `--lyrics-view`.
+    pub fn provider_status(&self) -> ProviderStatus {
+        ProviderStatus {
+            provider: self.provider.source(),
+            switching: self.switching,
+            missing_on: self.missing_on,
+        }
+    }
+
     /// `P`: next provider, saved to the config, asked for the current song.
     fn cycle_provider(&mut self, ctx: &Ctx) -> EventResponse {
+        ManagerMessage::Notify(self.next_provider(ctx.player)).event()
+    }
+
+    /// Switches to the next provider and asks it for the playing song.
+    /// Returns the notice to show.
+    pub fn next_provider(&mut self, player: &PlayerState) -> String {
         self.provider = self.provider.next();
         let source = self.provider.source();
         let mut notice = format!("Lyrics provider: {}", source.label());
@@ -378,11 +404,11 @@ impl LyricsView {
             notice.push_str(" (not saved to config)");
         }
         self.missing_on = None;
-        if let Some(video) = ctx.player.current().cloned() {
+        if let Some(video) = player.current().cloned() {
             self.switching = Some(source);
             self.fetch(&video, Some(source));
         }
-        ManagerMessage::Notify(notice).event()
+        notice
     }
 
     fn fetch_translation(&self, id: String, source: Source, lines: Vec<String>) {
@@ -406,6 +432,12 @@ impl LyricsView {
     }
 
     fn toggle(&mut self, romanize: bool) -> EventResponse {
+        ManagerMessage::Notify(self.toggle_option(romanize)).event()
+    }
+
+    /// Turns the romanization (or the translation) on or off, saved to the
+    /// config. Returns the notice to show.
+    pub fn toggle_option(&mut self, romanize: bool) -> String {
         let (name, on) = if romanize {
             self.romanize = !self.romanize;
             ("Romanization", self.romanize)
@@ -419,7 +451,7 @@ impl LyricsView {
             error!("Can't save lyrics toggles: {e}");
             notice.push_str(" (not saved to config)");
         }
-        ManagerMessage::Notify(notice).event()
+        notice
     }
 
     fn title(&self) -> String {

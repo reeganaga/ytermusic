@@ -4,7 +4,7 @@
 //! The player listens on a unix socket (`server`) and, while a viewer is
 //! connected, sends it JSON lines (`ToView`): the song, its lyrics when they
 //! change, and a playback anchor (position, paused) the viewer extrapolates
-//! from. The viewer answers with the three buttons it has (`ToHost`).
+//! from. The viewer answers with its buttons and keys (`ToHost`).
 //! Lyrics are fetched once, by the player, then shared.
 
 pub mod server;
@@ -14,7 +14,10 @@ use std::{io::Read, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{consts::CACHE_DIR, term::lyrics::State};
+use crate::{
+    consts::CACHE_DIR,
+    term::lyrics::{ProviderStatus, State},
+};
 
 /// Socket the player listens on: the runtime dir when there is one (private
 /// to the user), the cache dir otherwise.
@@ -59,6 +62,7 @@ pub struct Playback {
     pub offset_ms: i64,
     pub romanize: bool,
     pub translate: bool,
+    pub provider: ProviderStatus,
 }
 
 /// Viewer to player.
@@ -67,6 +71,12 @@ pub enum ToHost {
     PlayPause,
     Previous,
     Next,
+    /// Next lyrics provider, as `P` in the player
+    CycleProvider,
+    /// Romanization on / off, as `R` in the player
+    ToggleRomanize,
+    /// Translation on / off, as `T` in the player
+    ToggleTranslate,
 }
 
 /// Longest line accepted from a peer; a longer one drops the connection.
@@ -136,6 +146,32 @@ mod tests {
         let json = serde_json::to_string(&ToViewRef::Song(Some(&song))).unwrap();
         match serde_json::from_str::<ToView>(&json).unwrap() {
             ToView::Song(Some(read)) => assert_eq!(read, song),
+            _ => panic!("wrong message"),
+        }
+        for action in [
+            ToHost::CycleProvider,
+            ToHost::ToggleRomanize,
+            ToHost::ToggleTranslate,
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            let read = serde_json::from_str::<ToHost>(&json).unwrap();
+            assert_eq!(format!("{read:?}"), format!("{action:?}"));
+        }
+        let playback = Playback {
+            position_ms: 1,
+            paused: false,
+            offset_ms: 0,
+            romanize: true,
+            translate: false,
+            provider: ProviderStatus {
+                provider: lyrics::Source::Lrclib,
+                switching: Some(lyrics::Source::BetterLyrics),
+                missing_on: None,
+            },
+        };
+        let json = serde_json::to_string(&ToViewRef::Playback(playback)).unwrap();
+        match serde_json::from_str::<ToView>(&json).unwrap() {
+            ToView::Playback(read) => assert_eq!(read, playback),
             _ => panic!("wrong message"),
         }
         let json = serde_json::to_string(&ToViewRef::Lyrics(&State::NotFound)).unwrap();

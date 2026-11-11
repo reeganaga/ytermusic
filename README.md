@@ -127,7 +127,10 @@ folder, per provider.
 Lyrics view (Linux and macOS): run `ytermusic --lyrics-view` in a second terminal (a small
 window, a tmux pane...) while the player runs. It shows the cover (kitty / sixel / iTerm2
 terminals, with the `thumbnails` feature), the title, the artist and album, and the synced
-lyrics with romanization and translation, and has ◀◀ ⏯ ▶▶ buttons you click. Under 60 columns
+lyrics with romanization and translation, and has ◀◀ ⏯ ▶▶ buttons you click. The ⇄ line under the artist shows the lyrics provider: click it
+or press <kbd>p</kbd> to switch provider, like <kbd>P</kbd> in the player. On its right, `romaji` and
+`translate` (click, or <kbd>r</kbd> / <kbd>t</kbd>) turn the romanization and translation on and off,
+like <kbd>R</kbd> / <kbd>T</kbd> in the player. Under 60 columns
 or without image support the cover is hidden and the lyrics take the whole width. The player
 sends it the lyrics over a unix socket (`$XDG_RUNTIME_DIR/ytermusic.sock`, else the cache
 folder), so they are fetched once and nothing else needs setting up. `socket = false` in the

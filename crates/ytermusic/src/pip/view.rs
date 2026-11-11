@@ -7,6 +7,7 @@
 //! ```text
 //!  ┌─────────┐  Title
 //!  │  cover  │  artist • album
+//!  │         │  ⇄ provider p        ● romaji r  ○ translate t
 //!  │         │
 //!  └─────────┘  lyrics, the active line highlighted
 //!                romanization, translation
@@ -36,7 +37,7 @@ use unicode_width::UnicodeWidthStr;
 #[cfg(feature = "thumbnails")]
 use crate::term::thumbnail::Thumbnail;
 use crate::term::{
-    lyrics::LyricsView,
+    lyrics::{LyricsView, ProviderStatus, State},
     widgets::{accent, base, bold, dim, ellipsize, text},
 };
 
@@ -62,6 +63,9 @@ struct Areas {
     /// Title row, then the artist row under it
     title: Rect,
     artist: Rect,
+    /// Lyrics provider, clickable to switch it, and the romaji / translate
+    /// toggles (two rows: the toggles wrap to the second when narrow)
+    provider: Rect,
     lyrics: Rect,
     controls: Rect,
 }
@@ -128,11 +132,16 @@ fn areas(area: Rect, cover_font: Option<(u16, u16)>) -> Areas {
         cover,
         title: row(0),
         artist: row(1),
+        // The toggles go on the second row when the first is too narrow
+        provider: Rect {
+            height: 2.min(body.height.saturating_sub(2)),
+            ..row(2)
+        },
         lyrics: Rect {
             x,
-            y: body.y + 3.min(body.height),
+            y: body.y + 4.min(body.height),
             width,
-            height: body.height.saturating_sub(3 + reserved),
+            height: body.height.saturating_sub(4 + reserved),
         },
         controls,
     }
@@ -147,6 +156,8 @@ struct Viewer {
     lyrics: LyricsView,
     /// Last position the player told, and when
     playback: Option<(Playback, Instant)>,
+    /// Lyrics provider of the player
+    provider: Option<ProviderStatus>,
     /// Hit boxes of the buttons, from the last draw
     buttons: Vec<(Rect, ToHost)>,
     #[cfg(feature = "thumbnails")]
@@ -163,6 +174,7 @@ impl Viewer {
             song: None,
             lyrics: LyricsView::new(None),
             playback: None,
+            provider: None,
             buttons: Vec::new(),
             #[cfg(feature = "thumbnails")]
             cover: Thumbnail::large(),
@@ -183,8 +195,8 @@ impl Viewer {
         self.output.clear();
         self.song = None;
         self.playback = None;
-        self.lyrics
-            .set_remote(crate::term::lyrics::State::Idle, None);
+        self.provider = None;
+        self.lyrics.set_remote(State::Idle, None);
     }
 
     /// Reaches the player when not connected, reads what it sent and writes
@@ -247,6 +259,7 @@ impl Viewer {
                     playback.romanize,
                     playback.translate,
                 );
+                self.provider = Some(playback.provider);
                 self.playback = Some((playback, Instant::now()));
             }
         }
@@ -324,6 +337,10 @@ impl Viewer {
             let x = area.x + area.width.saturating_sub(hint.width() as u16) / 2;
             buf.set_stringn(x, y + 1, hint, area.width as usize, dim());
         }
+        self.buttons.clear();
+        if connected {
+            self.draw_provider(buf, areas.provider);
+        }
         self.draw_controls(buf, areas.controls, paused);
 
         #[cfg(feature = "thumbnails")]
@@ -337,8 +354,85 @@ impl Viewer {
         }
     }
 
+    /// `⇄ BetterLyrics · showing LRCLIB  p`: the picked provider, what is
+    /// shown when another source had the lyrics, and the switch state. Then
+    /// `● romaji r  ○ translate t`, on the right when both fit on one row,
+    /// on the row under it otherwise (shortened when even that is too narrow).
+    /// Each part is clickable.
+    fn draw_provider(&mut self, buf: &mut Buffer, area: Rect) {
+        let Some(status) = self.provider else {
+            return;
+        };
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        let (_, romanize, translate) = self.lyrics.options();
+        let width = area.width as usize;
+        let text = provider_text(status, self.lyrics.state());
+        let key = "  p";
+        let wanted = text.width() + key.width();
+        let long = toggle_labels(romanize, translate, false);
+        let long_width = labels_width(&long);
+        // One row when everything fits, else as much room as the provider can get
+        let (provider_width, toggles) = if wanted + TOGGLES_GAP + long_width <= width {
+            (
+                width - long_width,
+                Some((area.x + (width - long_width) as u16, area.y, long)),
+            )
+        } else if area.height >= 2 {
+            let labels = if long_width <= width {
+                long
+            } else {
+                toggle_labels(romanize, translate, true)
+            };
+            (width, Some((area.x, area.y + 1, labels)))
+        } else {
+            (width, None)
+        };
+
+        let shown = ellipsize(&text, provider_width.saturating_sub(key.width()));
+        let (x, _) = buf.set_stringn(area.x, area.y, &shown, provider_width, dim());
+        let (end, _) = buf.set_stringn(
+            x,
+            area.y,
+            key,
+            provider_width.saturating_sub(shown.width()),
+            accent(),
+        );
+        self.buttons.push((
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: end - area.x,
+                height: 1,
+            },
+            ToHost::CycleProvider,
+        ));
+
+        let Some((mut x, y, labels)) = toggles else {
+            return;
+        };
+        let right = area.x + area.width;
+        for (action, label, on) in labels {
+            let room = right.saturating_sub(x) as usize;
+            if room == 0 {
+                break;
+            }
+            let (end, _) = buf.set_stringn(x, y, &label, room, if on { accent() } else { dim() });
+            self.buttons.push((
+                Rect {
+                    x,
+                    y,
+                    width: end - x,
+                    height: 1,
+                },
+                action,
+            ));
+            x = end + TOGGLES_GAP as u16;
+        }
+    }
+
     fn draw_controls(&mut self, buf: &mut Buffer, area: Rect, paused: bool) {
-        self.buttons.clear();
         if area.height == 0 || self.stream.is_none() {
             return;
         }
@@ -370,6 +464,47 @@ impl Viewer {
             x += WIDTH + GAP;
         }
     }
+}
+
+/// Gap before and between the romaji / translate toggles
+const TOGGLES_GAP: usize = 2;
+
+/// `● romaji r`, `○ translate t`, or `● rom r`, `○ tl t` when `short`.
+fn toggle_labels(romanize: bool, translate: bool, short: bool) -> [(ToHost, String, bool); 2] {
+    let (romaji, translation) = if short {
+        ("rom", "tl")
+    } else {
+        ("romaji", "translate")
+    };
+    [
+        (ToHost::ToggleRomanize, romaji, 'r', romanize),
+        (ToHost::ToggleTranslate, translation, 't', translate),
+    ]
+    .map(|(action, name, key, on)| {
+        let mark = if on { '●' } else { '○' };
+        (action, format!("{mark} {name} {key}"), on)
+    })
+}
+
+/// Columns the toggles take, gaps between them included.
+fn labels_width(labels: &[(ToHost, String, bool)]) -> usize {
+    labels.iter().map(|(_, x, _)| x.width()).sum::<usize>()
+        + TOGGLES_GAP * labels.len().saturating_sub(1)
+}
+
+fn provider_text(status: ProviderStatus, state: &State) -> String {
+    let mut text = format!("⇄ {}", status.provider.label());
+    if let State::Loaded(lyrics) = state {
+        if lyrics.source != status.provider {
+            text.push_str(&format!(" · showing {}", lyrics.source.label()));
+        }
+    }
+    if let Some(source) = status.switching {
+        text.push_str(&format!(" · asking {}…", source.label()));
+    } else if let Some(source) = status.missing_on {
+        text.push_str(&format!(" · ⚠ not on {}", source.label()));
+    }
+    text
 }
 
 pub fn run() -> io::Result<()> {
@@ -412,6 +547,12 @@ pub fn run() -> io::Result<()> {
                         || (ctrl && matches!(key.code, KeyCode::Char('c' | 'd')))
                     {
                         return Ok(());
+                    }
+                    match key.code {
+                        KeyCode::Char('p' | 'P') => viewer.send(ToHost::CycleProvider),
+                        KeyCode::Char('r' | 'R') => viewer.send(ToHost::ToggleRomanize),
+                        KeyCode::Char('t' | 'T') => viewer.send(ToHost::ToggleTranslate),
+                        _ => {}
                     }
                 }
                 Event::Mouse(mouse) => match mouse.kind {
@@ -513,6 +654,72 @@ mod tests {
         // Buttons on the last row, below the lyrics
         assert_eq!(layout.controls.y, 19);
         assert!(layout.lyrics.y + layout.lyrics.height < layout.controls.y);
+    }
+
+    #[test]
+    fn provider_line_tells_fallback_and_switch() {
+        use lyrics::{Lyrics, Source};
+        let status = ProviderStatus {
+            provider: Source::BetterLyrics,
+            switching: None,
+            missing_on: None,
+        };
+        assert_eq!(provider_text(status, &State::Loading), "⇄ BetterLyrics");
+        let fallback = State::Loaded(Lyrics::from_plain(Source::Lrclib, "a"));
+        assert_eq!(
+            provider_text(status, &fallback),
+            "⇄ BetterLyrics · showing LRCLIB"
+        );
+        let asking = ProviderStatus {
+            switching: Some(Source::BetterLyricsQq),
+            ..status
+        };
+        assert!(provider_text(asking, &State::Loading).ends_with("asking BetterLyrics (QQ)…"));
+        let missing = ProviderStatus {
+            missing_on: Some(Source::BetterLyrics),
+            ..status
+        };
+        assert!(provider_text(missing, &fallback).ends_with("⚠ not on BetterLyrics"));
+    }
+
+    #[test]
+    fn toggles_wrap_under_the_provider_when_narrow() {
+        use lyrics::Source;
+        let mut viewer = Viewer::new();
+        viewer.provider = Some(ProviderStatus {
+            provider: Source::BetterLyricsQq,
+            switching: None,
+            missing_on: None,
+        });
+        let row = |width| Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 2,
+        };
+        let toggle_rows = |viewer: &Viewer| {
+            viewer
+                .buttons
+                .iter()
+                .filter(|(_, action)| !matches!(action, ToHost::CycleProvider))
+                .map(|(rect, _)| rect.y)
+                .collect::<Vec<_>>()
+        };
+        // Wide: provider and toggles share the first row
+        let mut buf = Buffer::empty(row(80));
+        viewer.draw_provider(&mut buf, row(80));
+        assert_eq!(toggle_rows(&viewer), vec![0, 0]);
+        // 46 columns wide terminal: the toggles go under the provider
+        viewer.buttons.clear();
+        let mut buf = Buffer::empty(row(42));
+        viewer.draw_provider(&mut buf, row(42));
+        assert_eq!(toggle_rows(&viewer), vec![1, 1]);
+        // Very narrow: short labels, still both shown and inside the area
+        viewer.buttons.clear();
+        let mut buf = Buffer::empty(row(16));
+        viewer.draw_provider(&mut buf, row(16));
+        assert_eq!(toggle_rows(&viewer), vec![1, 1]);
+        assert!(viewer.buttons.iter().all(|(rect, _)| rect.right() <= 16));
     }
 
     #[test]

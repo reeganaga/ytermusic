@@ -538,7 +538,9 @@ impl Manager {
             }
             #[cfg(unix)]
             if let Some(pip) = self.pip.as_mut() {
-                pip.tick(&mut self.player, &mut self.lyrics);
+                if let Some(notice) = pip.tick(&mut self.player, &mut self.lyrics) {
+                    self.notice = Some((notice, Instant::now()));
+                }
             }
             terminal.draw(|f| {
                 self.player.update();

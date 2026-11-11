@@ -91,7 +91,8 @@ impl PipServer {
     }
 
     /// Accepts viewers, applies their buttons and sends what changed.
-    pub fn tick(&mut self, player: &mut PlayerState, lyrics: &mut LyricsView) {
+    /// Returns a notice for the player to show (provider or toggle changed).
+    pub fn tick(&mut self, player: &mut PlayerState, lyrics: &mut LyricsView) -> Option<String> {
         let mut accepted = false;
         loop {
             match self.listener.accept() {
@@ -115,7 +116,7 @@ impl PipServer {
         if self.clients.is_empty() {
             // Nothing to keep up to date: the next viewer gets everything
             self.sent = Sent::default();
-            return;
+            return None;
         }
 
         let mut actions = Vec::new();
@@ -129,13 +130,16 @@ impl PipServer {
             }
             alive
         });
+        let mut notice = None;
         for action in actions {
             match action {
-                ToHost::PlayPause => SoundAction::PlayPause,
-                ToHost::Previous => SoundAction::Previous(1),
-                ToHost::Next => SoundAction::Next(1),
+                ToHost::PlayPause => SoundAction::PlayPause.apply_sound_action(player),
+                ToHost::Previous => SoundAction::Previous(1).apply_sound_action(player),
+                ToHost::Next => SoundAction::Next(1).apply_sound_action(player),
+                ToHost::CycleProvider => notice = Some(lyrics.next_provider(player)),
+                ToHost::ToggleRomanize => notice = Some(lyrics.toggle_option(true)),
+                ToHost::ToggleTranslate => notice = Some(lyrics.toggle_option(false)),
             }
-            .apply_sound_action(player);
         }
 
         // Lyrics are only fetched while the panel is open, or here for the viewer
@@ -151,6 +155,7 @@ impl PipServer {
             }
         }
         self.clients.retain_mut(flush);
+        notice
     }
 
     /// Messages for what changed since the last call.
@@ -183,6 +188,7 @@ impl PipServer {
             offset_ms,
             romanize,
             translate,
+            provider: lyrics.provider_status(),
         };
         let send_playback = match &self.sent.playback {
             None => true,
@@ -197,6 +203,7 @@ impl PipServer {
                     || last.offset_ms != playback.offset_ms
                     || last.romanize != playback.romanize
                     || last.translate != playback.translate
+                    || last.provider != playback.provider
                     || (playback.position_ms as i64 - expected).abs() > SEEK_THRESHOLD_MS
                     || at.elapsed() > RESYNC
             }
